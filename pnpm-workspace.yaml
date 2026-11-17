@@ -29,3 +29,7 @@ peerDependencyRules:
   ignoreMissing:
     - react
     - react-dom
+auditConfig:
+  # picomatch ReDoS: reached only through rollup build plugins, never bundled into dist. No patched release yet; remove when one ships.
+  ignoreGhsas:
+    - GHSA-fc5q-39xc-vjpf
