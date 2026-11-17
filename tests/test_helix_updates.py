@@ -13,7 +13,10 @@ from test_backend import Fixtures
 from test_plugin_updates import FakeResponse
 
 
-def release(version='1.7.0', size=56601341, digest='b' * 64):
+PINNED = dict(version='1.8.1', size=55766339, digest='abab32b16acf2536b39663763c355f3cfd35c4876c90297d6b5481bd9ad03a19')
+
+
+def release(version=PINNED['version'], size=PINNED['size'], digest=PINNED['digest']):
     tag = 'v' + version
     return dict(tag_name=tag, html_url=f'https://github.com/{manager.REPO}/releases/tag/{tag}',
                 assets=[dict(name=f'HelixSR-{version}.zip', size=size, digest='sha256:' + digest,
@@ -27,12 +30,14 @@ class HelixUpdates(Fixtures):
         with patch('manager.https_context', return_value=None), patch('manager.urllib.request.urlopen', return_value=response):
             return self.m.check_update(True)
 
-    def test_replaced_same_version_and_future_different_size_are_accepted(self):
-        for ver, size, digest in [('1.7.0', 26037871, 'a' * 64), ('1.7.0', 56601341, 'b' * 64),
-                                  ('1.8.0', 71000000, 'c' * 64)]:
-            actual = self.check(release(ver, size, digest))
-            self.assertEqual((actual['version'], actual['size'], actual['sha256']), (ver, size, digest))
-            self.assertIsNone(actual['error'])
+    def test_reviewed_release_is_accepted_and_unreviewed_old_or_replaced_assets_are_rejected(self):
+        actual = self.check(release())
+        self.assertEqual((actual['version'], actual['size'], actual['sha256']),
+                         (PINNED['version'], PINNED['size'], PINNED['digest']))
+        self.assertIsNone(actual['error'])
+        for ver, size, digest in [('1.7.0', 26037871, 'a' * 64), ('1.8.1', 56601341, 'b' * 64)]:
+            with self.subTest(version=ver, size=size):
+                self.assertIn('does not match', self.check(release(ver, size, digest))['error'])
 
     def test_old_cache_policy_forces_refresh_and_drops_etag(self):
         manager.atomic_json(self.m.settings / 'release.json', dict(version='1.7.0', sha256='a' * 64,
@@ -41,7 +46,7 @@ class HelixUpdates(Fixtures):
         response.headers = {}
         with patch('manager.https_context', return_value=None), patch('manager.urllib.request.urlopen', return_value=response) as request:
             actual = self.m.check_update()
-        self.assertEqual(actual['size'], 56601341)
+        self.assertEqual(actual['size'], PINNED['size'])
         self.assertNotIn('If-none-match', request.call_args.args[0].headers)
 
     def test_304_is_success_without_failed_at(self):
@@ -65,7 +70,7 @@ class HelixUpdates(Fixtures):
         (self.m.settings / 'release.json').write_text('{invalid')
         with patch('manager.discover', return_value=([], [])):
             self.assertEqual(self.m.refresh()['games'], [])
-        self.assertEqual(self.check(release())['size'], 56601341)
+        self.assertEqual(self.check(release())['size'], PINNED['size'])
 
     def test_preparation_and_terms_reject_stale_metadata_with_error(self):
         release_info = dict(version='1.7.0', sha256='a' * 64, error='GitHub unavailable')

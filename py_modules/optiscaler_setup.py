@@ -8,7 +8,7 @@ import re
 import shlex
 
 
-GUIDE = 'https://github.com/dawoodtogoo2020-code/HelixSR-Decky/blob/main/OPTISCALER_GUIDE.md'
+GUIDE = 'https://github.com/snooptheone/HelixSR-Decky/blob/main/OPTISCALER_GUIDE.md'
 KEYS = ('Dx12Upscaler', 'FfxDx12Path', 'FfxDx12SRPath', 'EnableDlssInputs',
         'NvapiPath', 'OverrideNvapiDll', 'UseFakenvapi', 'Dxgi', 'ShortcutKey',
         'FGInput', 'FGNvngxReplacement')

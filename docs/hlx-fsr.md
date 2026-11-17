@@ -14,7 +14,7 @@ Decky 0.1.37 added **HLX FSR 4 (FSR 4.1.2 Lite)** to the game details screen and
 | AMD FSR, DLSS or XeSS in the game | Input route. The in-game label alone cannot establish which output provider ran. |
 | Frame generation | Independent of SR. The 3.2 package has no HelixSR Light/Full FG. Scaler's FSR FG and XeSS FG require game and hardware support. The existing 2.0 options remain available on 2.0; earlier Steam Deck/PRAGMATA tests reported flicker and poor performance. |
 
-**Download:** [Installable Decky ZIP](https://github.com/dawoodtogoo2020-code/HelixSR-Decky/releases/download/v0.1.39/HelixSR-Decky-0.1.39.zip) · [Release and checksums](https://github.com/dawoodtogoo2020-code/HelixSR-Decky/releases/tag/v0.1.39)
+**Download:** [Installable Decky ZIP](https://github.com/snooptheone/HelixSR-Decky/releases/download/v0.1.39/HelixSR-Decky-0.1.39.zip) · [Release and checksums](https://github.com/snooptheone/HelixSR-Decky/releases/tag/v0.1.39)
 
 **Install on a Steam Deck or other x86-64 SteamOS device**
 

@@ -82,4 +82,4 @@ If the helper crashes, cannot establish input transparency, loses its status fee
 
 Decky also submits brief status-change notifications while monitoring is enabled, including when the continuous HUD is unavailable. Open the plugin to see the current reason and runtime evidence. Notification delivery is controlled by Steam/Decky and is not used as proof of HUD visibility.
 
-[Report a problem](https://github.com/dawoodtogoo2020-code/HelixSR-Decky/issues/new?template=bug_report.yml): include the plugin/app version, game, Proton version, installation route, exact status and short sanitized log excerpt. Do not upload generated networks or personal files.
+[Report a problem](https://github.com/snooptheone/HelixSR-Decky/issues/new?template=bug_report.yml): include the plugin/app version, game, Proton version, installation route, exact status and short sanitized log excerpt. Do not upload generated networks or personal files.

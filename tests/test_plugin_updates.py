@@ -84,7 +84,7 @@ def archive_bytes(folder, version="0.1.1", extra=None, omit=()):
         }).encode(),
         f"{plugin_updates.FOLDER}/dist/index.js": b"export {};\n",
         **{f"{plugin_updates.FOLDER}/py_modules/{name}.py": b"# fixture\n"
-           for name in ('manager', 'library', 'awareness', 'plugin_updates')},
+           for name in plugin_updates.REQUIRED_MODULES},
     }
     entries.update(extra or {})
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -112,55 +112,25 @@ class PluginUpdateFixtures(unittest.TestCase):
 
 
 class ReleaseValidationTests(PluginUpdateFixtures):
-    def test_modern_release_requires_bootstrap_and_release_adapter(self):
-        modules = ('optiscaler_setup', 'launch_receipts', 'operation_lock', 'host_environment',
-                   'model_variants', 'build_runtime', 'github_release', '_helix_html',
-                   '_helix_html_parser', '_helix_html_entities', '_helix_markupbase',
-                   'compatibility_release')
-        extra = {f'{plugin_updates.FOLDER}/py_modules/{name}.py': b'# fixture\n' for name in modules}
-        extra.update({f'{plugin_updates.FOLDER}/licenses/{name}': b'fixture license/provenance\n'
-                      for name in ('cpython-3.11.17-LICENSE.txt', 'cpython-3.11.17-PROVENANCE.json')})
-        archive_bytes(self.root, '0.1.29', extra=extra)
-        plugin_updates.validate_zip(self.root / 'fixture.zip', '0.1.29')
-        modern = ('modern_build', 'modern_release')
-        extra.update({f'{plugin_updates.FOLDER}/py_modules/{name}.py': b'# fixture\n' for name in modern})
-        for version in ('0.1.30', '0.1.31', '0.1.32'):
-            required = modern if version == '0.1.30' else modern + ('helix20_release', 'helix_settings')
-            if version == '0.1.32':
-                required += ('discovery_records',)
-            extra.update({f'{plugin_updates.FOLDER}/py_modules/{name}.py': b'# fixture\n' for name in required})
-            archive_bytes(self.root, version, extra=extra)
-            plugin_updates.validate_zip(self.root / 'fixture.zip', version)
-            for name in required:
-                archive_bytes(self.root, version, extra=extra,
-                              omit=(f'{plugin_updates.FOLDER}/py_modules/{name}.py',))
-                with self.subTest(version=version, omitted=name), self.assertRaisesRegex(ValueError, 'Incomplete'):
-                    plugin_updates.validate_zip(self.root / 'fixture.zip', version)
-                for suffix, mode in (('/', stat.S_IFDIR), ('', stat.S_IFDIR), ('', stat.S_IFIFO)):
-                    archive_bytes(self.root, version, extra=extra,
-                                  omit=(f'{plugin_updates.FOLDER}/py_modules/{name}.py',))
-                    entry = zipfile.ZipInfo(f'{plugin_updates.FOLDER}/py_modules/{name}.py{suffix}')
+    def test_release_requires_every_runtime_module_and_notice(self):
+        path = self.root / 'fixture.zip'
+        archive_bytes(self.root, '0.1.50')
+        plugin_updates.validate_zip(path, '0.1.50')
+        names = [f'py_modules/{name}.py' for name in plugin_updates.REQUIRED_MODULES]
+        names += list(plugin_updates.REQUIRED_FILES)
+        for name in names:
+            full = f'{plugin_updates.FOLDER}/{name}'
+            for suffix, mode in (('', None), ('/', stat.S_IFDIR), ('', stat.S_IFIFO)):
+                archive_bytes(self.root, '0.1.50', omit=(full,))
+                if mode is not None:
+                    entry = zipfile.ZipInfo(full + suffix)
                     entry.create_system = 3
                     entry.external_attr = (mode | 0o755) << 16
-                    with zipfile.ZipFile(self.root / 'fixture.zip', 'a') as archive:
+                    with zipfile.ZipFile(path, 'a') as archive:
                         archive.writestr(entry, b'')
-                    with self.subTest(version=version, name=name, suffix=suffix, mode=mode), \
-                            self.assertRaisesRegex(ValueError, 'Incomplete'):
-                        plugin_updates.validate_zip(self.root / 'fixture.zip', version)
-
-    def test_new_release_requires_bundled_parser_and_its_notices(self):
-        modules = ('optiscaler_setup', 'launch_receipts', 'operation_lock', 'host_environment',
-                   'model_variants', 'build_runtime', 'github_release', '_helix_html',
-                   '_helix_html_parser', '_helix_html_entities', '_helix_markupbase')
-        extra = {f'{plugin_updates.FOLDER}/py_modules/{name}.py': b'# fixture\n' for name in modules}
-        extra.update({f'{plugin_updates.FOLDER}/licenses/{name}': b'fixture license/provenance\n'
-                      for name in ('cpython-3.11.17-LICENSE.txt', 'cpython-3.11.17-PROVENANCE.json')})
-        archive_bytes(self.root, '0.1.14', extra=extra)
-        plugin_updates.validate_zip(self.root / 'fixture.zip', '0.1.14')
-        for name in extra:
-            archive_bytes(self.root, '0.1.14', extra=extra, omit=(name,))
-            with self.subTest(omitted=name), self.assertRaisesRegex(ValueError, 'Incomplete'):
-                plugin_updates.validate_zip(self.root / 'fixture.zip', '0.1.14')
+                with self.subTest(omitted=name, suffix=suffix, mode=mode), \
+                        self.assertRaisesRegex(ValueError, 'Incomplete'):
+                    plugin_updates.validate_zip(path, '0.1.50')
 
     def test_semver_is_strict_and_release_identity_is_exact(self):
         self.assertEqual(plugin_updates.semver("v0.1.11"), (0, 1, 11))
@@ -239,19 +209,6 @@ class ReleaseValidationTests(PluginUpdateFixtures):
         path.write_bytes(archive_bytes(self.root, omit=(f'{plugin_updates.FOLDER}/py_modules/manager.py',)))
         with self.assertRaisesRegex(ValueError, 'Incomplete'):
             plugin_updates.validate_zip(path, '0.1.1')
-
-    def test_setup_release_requires_its_new_runtime_modules(self):
-        path = self.root / 'setup-release.zip'
-        base = ('optiscaler_setup', 'launch_receipts', 'operation_lock', 'host_environment')
-        for version, required in (('0.1.6', base), ('0.1.9', base + ('model_variants', 'build_runtime'))):
-            extra = {f'{plugin_updates.FOLDER}/py_modules/{name}.py': b'# fixture\n' for name in required}
-            path.write_bytes(archive_bytes(self.root, version=version, extra=extra))
-            plugin_updates.validate_zip(path, version)
-            for name in required:
-                path.write_bytes(archive_bytes(self.root, version=version, extra=extra,
-                                 omit=(f'{plugin_updates.FOLDER}/py_modules/{name}.py',)))
-                with self.subTest(version=version, name=name), self.assertRaisesRegex(ValueError, 'Incomplete'):
-                    plugin_updates.validate_zip(path, version)
 
 
 class SchedulingAndNetworkTests(PluginUpdateFixtures):

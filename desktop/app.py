@@ -27,7 +27,7 @@ from .system import system_environment
 from .folder_dialog import FolderDialog
 from py_modules.game_guidance import setup_guidance
 
-PROJECT = "https://github.com/dawoodtogoo2020-code/HelixSR-Decky"
+PROJECT = "https://github.com/snooptheone/HelixSR-Decky"
 GUIDE = PROJECT + "/blob/main/DESKTOP_GUIDE.md"
 BUGS = PROJECT + "/issues"
 ACTIVE = {"running", "queued", "cancelling"}
@@ -62,19 +62,12 @@ def open_external_url(url):
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or any(ord(c) < 32 for c in url):
         raise ValueError("External links must be plain HTTPS URLs")
     env = system_environment()
-    if sys.platform.startswith("win"):
-        root = env.get("WINDIR") or env.get("SystemRoot")
-        if not root:
-            raise RuntimeError("Windows browser launcher is unavailable")
-        command = [os.path.join(root, "explorer.exe"), url]
-        flags = {"creationflags": subprocess.CREATE_NO_WINDOW}
-    else:
-        executable = shutil.which("xdg-open", path=env.get("PATH"))
-        if not executable or not os.path.isabs(executable):
-            raise RuntimeError("xdg-open is unavailable. Open this link manually: " + url)
-        command, flags = [executable, url], {}
+    executable = shutil.which("xdg-open", path=env.get("PATH"))
+    if not executable or not os.path.isabs(executable):
+        raise RuntimeError("xdg-open is unavailable. Open this link manually: " + url)
+    command = [executable, url]
     subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **flags)
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def link_label(html, notify):

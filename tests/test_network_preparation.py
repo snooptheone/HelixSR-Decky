@@ -114,7 +114,7 @@ class RuntimeAndErrorTests(unittest.TestCase):
         candidates = [Path('/Steam library/broken/files/bin/wine'),
                       Path('/Steam library/Proton/files/bin/wine')]
         with patch('manager.platform.system', return_value='Linux'), \
-                patch('manager.wine_candidates', return_value=candidates), \
+                patch('build_tools.wine_candidates', return_value=candidates), \
                 patch('manager.subprocess.run', side_effect=[
                     OSError('not executable on this host'),
                     subprocess.CompletedProcess([], 0, 'wine-9.0\n')]) as run:
@@ -127,7 +127,7 @@ class RuntimeAndErrorTests(unittest.TestCase):
 
     def test_all_probe_failures_keep_upstream_fallback(self):
         with patch('manager.platform.system', return_value='Linux'), \
-                patch('manager.wine_candidates', return_value=[Path('/p/wine')]), \
+                patch('build_tools.wine_candidates', return_value=[Path('/p/wine')]), \
                 patch('manager.subprocess.run', side_effect=subprocess.TimeoutExpired('wine', 3)):
             selected, notes = manager.select_build_wine('/home/test', {})
         self.assertIsNone(selected)
@@ -135,7 +135,7 @@ class RuntimeAndErrorTests(unittest.TestCase):
 
     def test_success_exit_without_wine_version_is_not_a_runtime(self):
         with patch('manager.platform.system', return_value='Linux'), \
-                patch('manager.wine_candidates', return_value=[Path('/p/wine')]), \
+                patch('build_tools.wine_candidates', return_value=[Path('/p/wine')]), \
                 patch('manager.subprocess.run', return_value=subprocess.CompletedProcess([], 0, 'not Wine')):
             self.assertIsNone(manager.select_build_wine('/home/test', {})[0])
 

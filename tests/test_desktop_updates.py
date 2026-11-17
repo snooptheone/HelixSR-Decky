@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'py_modules'))
 from desktop import app_updates as updates
 
 
+IMAGE = b'\x7fELF\x02\x01\x01\x00AI\x02' + bytes(16)
+
 class Response(io.BytesIO):
     def __init__(self, body, url):
         super().__init__(body)
@@ -57,7 +59,7 @@ class DesktopUpdatesTests(unittest.TestCase):
         self.assertEqual(status['latest_version'], '0.3.0')
         self.assertTrue(status['update_available'])
 
-    def download(self, actual, expected=b'AppImage fixture', host='https://release-assets.githubusercontent.com/asset'):
+    def download(self, actual, expected=IMAGE, host='https://release-assets.githubusercontent.com/asset'):
         metadata = release(body=expected)
         responses = [Response(json.dumps([metadata]).encode(), updates.API), Response(actual, host)]
         with patch.object(updates, 'https_context', return_value=None), \
@@ -65,18 +67,24 @@ class DesktopUpdatesTests(unittest.TestCase):
             return self.updater.download()
 
     def test_verified_atomic_download_never_executes(self):
-        result = self.download(b'AppImage fixture')
-        self.assertEqual(Path(result['path']).read_bytes(), b'AppImage fixture')
+        result = self.download(IMAGE)
+        self.assertEqual(Path(result['path']).read_bytes(), IMAGE)
         self.assertEqual(result['version'], '0.2.0')
         self.assertEqual(list(self.updater.stage.glob('.download-*')), [])
 
     def test_digest_size_and_redirect_fail_without_artifacts(self):
         for body, host in [(b'wrong content', 'https://github.com/a'),
-                (b'AppImage fixtureEXTRA', 'https://github.com/a'),
-                (b'AppImage fixture', 'https://evil.test/asset')]:
+                (IMAGE + b'EXTRA', 'https://github.com/a'),
+                (IMAGE, 'https://evil.test/asset')]:
             with self.assertRaises(ValueError):
                 self.download(body, host=host)
             self.assertEqual(list(self.updater.stage.iterdir()), [])
+
+    def test_matching_digest_without_appimage_header_is_rejected(self):
+        fake = b'#!/bin/sh\necho not an AppImage\n' + bytes(16)
+        with self.assertRaisesRegex(ValueError, 'type 2 AppImage'):
+            self.download(fake, expected=fake)
+        self.assertEqual(list(self.updater.stage.iterdir()), [])
 
     def test_auto_off_still_allows_manual_check_and_corruption_defaults(self):
         self.updater.set_auto(False)

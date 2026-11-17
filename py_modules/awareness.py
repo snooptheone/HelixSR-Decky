@@ -113,9 +113,6 @@ def launch_options(home, appid, warnings=None):
 def active_processes(folder, appid=''):
     out = []
     root = Path(folder).resolve()
-    if os.name == 'nt':
-        from windows_processes import active_processes as windows_processes
-        return windows_processes(root)
     if not Path('/proc').is_dir():
         return out
     for p in Path('/proc').glob('[0-9]*'):

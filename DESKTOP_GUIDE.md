@@ -9,7 +9,7 @@ Game detection and local diagnostics work offline. Existing installations can be
 Decky **0.1.31** and Desktop **0.1.20** add the reviewed official **HelixSR 2.0.0** release and **Scaler 1.1.0**. Select **Latest upstream**, scan, then review Install/Update. The unchanged official converter builds the upscaling network and both Light/Full frame-generation models locally. Per-game Scaler settings are editable in the plugin and desktop app. **Compatible HelixSR 1.8.1** remains available explicitly. Future releases are detected by scanning; an unfamiliar version or replaced archive requires a reviewed app update before installation. See [2.0 settings and compatibility](UPGRADE_2.0.md).
 
 1. Switch your SteamOS device to Desktop Mode.
-2. Open the [releases page](https://github.com/dawoodtogoo2020-code/HelixSR-Decky/releases) and choose the newest **HelixSR Desktop** release, whose tag starts with `desktop-v`. Download **HelixSR-Desktop-VERSION-x86_64.AppImage** under **Assets**. Replace VERSION below with that release's version. Save it in a folder such as `Applications` under your own home folder. The release marked **Latest** can be the Decky plugin ZIP; the standalone app has its own desktop release.
+2. Open the [releases page](https://github.com/snooptheone/HelixSR-Decky/releases) and choose the newest **HelixSR Desktop** release, whose tag starts with `desktop-v`. Download **HelixSR-Desktop-VERSION-x86_64.AppImage** under **Assets**. Replace VERSION below with that release's version. Save it in a folder such as `Applications` under your own home folder. The release marked **Latest** can be the Decky plugin ZIP; the standalone app has its own desktop release.
 3. In your file manager, right-click the AppImage, open **Properties → Permissions**, and enable **Is executable** (wording varies).
 4. Double-click the AppImage. Do not run it with sudo or as administrator.
 
@@ -54,7 +54,7 @@ Use **Disable**, **Enable**, or **Remove** from the selected game when its owner
 
 A **Managed files changed** message means the conflicting file no longer matches HelixSR's recorded installed bytes. The status is **Needs review**, even if the record says HelixSR was enabled. Steam verification may replace DLLs or remove mods, but it does not reconcile HelixSR's installed-file hash record and cannot by itself guarantee that the block clears. Keep mutation and recovery guards in place; interrupted-transaction recovery stops when live files differ from its allowed hashes.
 
-Close the game and read the exact conflicting filename. Preserve installation records and original files until ownership is resolved. Do not delete records or backups or force an install. [Report the conflict](https://github.com/dawoodtogoo2020-code/HelixSR-Decky/issues/new?template=bug_report.yml) with the filename, desktop and HelixSR versions, **Recorded route**, Proton version and short relevant logs, with personal details removed.
+Close the game and read the exact conflicting filename. Preserve installation records and original files until ownership is resolved. Do not delete records or backups or force an install. [Report the conflict](https://github.com/snooptheone/HelixSR-Decky/issues/new?template=bug_report.yml) with the filename, desktop and HelixSR versions, **Recorded route**, Proton version and short relevant logs, with personal details removed.
 
 Both apps share installation records beside each game in `<Game> Mod Files/HelixSR-Decky`. Desktop preferences are separate under `$XDG_CONFIG_HOME/helixsr-desktop`, or `~/.config/helixsr-desktop` by default. Locally generated NVIDIA-derived network files must remain on the device where they were generated.
 
@@ -80,13 +80,13 @@ Desktop 0.1.14 isolates malformed library/profile metadata and per-game scan err
 
 The Games tab now shows exact blockers and next steps beside the controls. Its optional status-overlay toggle checks HUD helper health and monitors new runtime events. See the [status and overlay guide](STATUS_GUIDE.md) for **Game running**, changed-file ownership, runtime evidence and experimental display support.
 
-Open [a bug report](https://github.com/dawoodtogoo2020-code/HelixSR-Decky/issues/new?template=bug_report.yml). Include the app or plugin version, device model, SteamOS/Linux version, launcher, game, selected renderer, and the exact error. Copy the relevant diagnostics or build log after removing personal paths or other private information. Do not upload generated weights, kernels, entire game folders or credentials.
+Open [a bug report](https://github.com/snooptheone/HelixSR-Decky/issues/new?template=bug_report.yml). Include the app or plugin version, device model, SteamOS/Linux version, launcher, game, selected renderer, and the exact error. Copy the relevant diagnostics or build log after removing personal paths or other private information. Do not upload generated weights, kernels, entire game folders or credentials.
 
 You can also comment on the [HelixSR video](https://www.youtube.com/watch?v=atLknP_heZY). GitHub issues keep reproducible reports and fix tracking in one place.
 
 ## Run from source
 
-Use Python 3.11 or newer and a user-owned virtual environment. Install `PySide6-Essentials==6.11.2` and `shiboken6==6.11.2`, then run `python -m desktop.app` from the repository. The [source](https://github.com/dawoodtogoo2020-code/HelixSR-Decky) includes the desktop backend, native UI, regression tests and build scripts.
+Use Python 3.11 or newer and a user-owned virtual environment. Install `PySide6-Essentials==6.11.2` and `shiboken6==6.11.2`, then run `python -m desktop.app` from the repository. The [source](https://github.com/snooptheone/HelixSR-Decky) includes the desktop backend, native UI, regression tests and build scripts.
 
 ## Follow the next step
 

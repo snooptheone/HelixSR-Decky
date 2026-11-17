@@ -19,9 +19,7 @@ import urllib.request
 import uuid
 import zipfile
 import platform
-import ssl
 from email.utils import parsedate_to_datetime
-from functools import lru_cache
 from library import discover, discover_launcher, safe_root, scan_tree, text
 from discovery_records import normalize_imports
 from awareness import awareness, active_processes, text_tail, optiscaler_proxy
@@ -34,6 +32,9 @@ import modern_release
 import helix20_release
 import hlx_fsr_release
 import scaler_proxy
+from build_tools import BUILD_IDLE_SECONDS, BUILD_LIMIT_SECONDS, BUILD_MESSAGE, BUILD_PREPARATION_NOTE, COPY_MESSAGE, HLX_PREPARATION_NOTE, REUSE_MESSAGE, _BUILD_BAR, _BUILD_LINE, build_only_script, build_progress, check_build_exit, select_build_wine
+from pe_info import pe_info
+from fileops import _confirmed_executable_sha, atomic_json, checked_path, confirmed_executable_sha, durable_copy, durable_directory, https_context, load_json, safe_extract, sha, sync_directory
 
 def release_adapter(record):
     if hlx_fsr_release.modern(record):
@@ -55,11 +56,9 @@ def manifest_path(record):
 import helix_settings
 import reframework
 from modern_build import build_script as modern_build_script
-from compatibility_release import (COMPATIBLE_CHOICE, compatible_release, selection,
-                                   validate_compatible_release, require_supported_latest,
+from compatibility_release import (COMPATIBLE_CHOICE, selection,
+                                   validate_compatible_release, require_supported_latest, parse_version,
                                    reviewed_release, release_choices, release_status)
-from build_runtime import wine_candidates
-from github_release import web_latest_release
 from model_variants import (DEFAULT_VARIANT, catalog, package_selection, same_release,
                             select_variant, valid_variant, variant_label, verify_recipe, verify_outputs)
 
@@ -99,7 +98,7 @@ CONFIG_LIMIT = 1 << 20
 
 
 def github_pause(error, now):
-    """Honor server backoff; only a proven primary quota permits web fallback."""
+    """Honor server backoff headers from a GitHub API rate-limit or abuse response."""
     headers = error.headers or {}
     retry = headers.get('Retry-After')
     if retry is not None or error.code == 429:
@@ -179,343 +178,11 @@ def direct_backup(target, record):
     return target.with_name(target.stem + '.original.dll')
 
 
-def sha(path):
-    h = hashlib.sha256()
-    with Path(path).open('rb') as f:
-        for chunk in iter(lambda: f.read(1 << 20), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def confirmed_executable_sha(path):
-    """Hash a confirmed executable once per stable on-disk identity."""
-    p = Path(path)
-    info = p.stat()
-    return _confirmed_executable_sha(str(p), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
-
-
-@lru_cache(maxsize=64)
-def _confirmed_executable_sha(path, device, inode, size, modified):
-    return sha(path)
-
-
-def atomic_json(path, value):
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + '.tmp-' + uuid.uuid4().hex)
-    with tmp.open('w', encoding='utf-8') as f:
-        f.write(json.dumps(value, indent=2) + '\n')
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, p)
-    if os.name == 'posix':
-        fd = os.open(p.parent, os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-
-
-def sync_directory(path):
-    if os.name == 'posix':
-        fd = os.open(path, os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-
-
-def durable_directory(path):
-    """Persist each new directory entry before a recovery journal depends on it."""
-    missing, parent = [], Path(path)
-    while not parent.exists():
-        missing.append(parent)
-        parent = parent.parent
-    for directory in reversed(missing):
-        directory.mkdir()
-        sync_directory(directory.parent)
-
-
-def durable_copy(src, dst, expected=None):
-    """Persist verified recovery bytes and every newly created directory entry."""
-    src, dst = Path(src), Path(dst)
-    durable_directory(dst.parent)
-    expected = expected or sha(src)
-    shutil.copy2(src, dst)
-    if sha(dst) != expected or sha(src) != expected:
-        raise ValueError('Recovery copy changed or failed verification')
-    # POSIX permits syncing a read-only descriptor, preserving original modes.
-    # Windows' CRT requires a writable descriptor for its fsync implementation.
-    with dst.open('rb' if os.name == 'posix' else 'r+b') as stream:
-        os.fsync(stream.fileno())
-    sync_directory(dst.parent)
-
-
-def https_context():
-    # Decky's bundled Python may retain a build-host CA path. Use SteamOS's trust store.
-    if os.name == 'posix':
-        for path in ('/etc/ssl/certs/ca-certificates.crt', '/etc/ssl/cert.pem'):
-            if Path(path).is_file():
-                return ssl.create_default_context(cafile=path)
-    return ssl.create_default_context()
-
-
-def load_json(path, default=None):
-    try:
-        return json.loads(Path(path).read_text())
-    except FileNotFoundError:
-        return {} if default is None else default
-
-
 def version(value):
     m = re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)', value)
     if not m:
         raise ValueError('Only stable semantic-version releases are supported')
     return tuple(map(int, m.groups()))
-
-
-REUSE_MESSAGE = 'Reusing the verified prepared package on this drive; nothing is rebuilt'
-COPY_MESSAGE = ('Copying the verified package this device already built on another drive; '
-                'nothing is rebuilt and no games are changed')
-BUILD_MESSAGE = ('Building the local NVIDIA-derived network. This is needed once per device for this '
-                 'HelixSR version and model; other games reuse it. No games are changed.')
-BUILD_PREPARATION_NOTE = ('The first preparation of this HelixSR version and model on this device builds its '
-                          'network locally. This can take several minutes, longer on a Steam Deck. Other games reuse '
-                          'it; a game on another drive, such as a microSD card, gets a verified copy instead of a rebuild.')
-HLX_PREPARATION_NOTE = ('HLX FSR 4 needs no local network build: preparation downloads and verifies the reviewed '
-                        'files, then other games on this drive reuse them.')
-BUILD_IDLE_SECONDS = 600
-BUILD_LIMIT_SECONDS = 3600
-_BUILD_LINE = re.compile(r'^\[helixsr-(setup|fg)\] (.+)$')
-_BUILD_BAR = re.compile(r'^\[[#-]{20}\]\s+(\d{1,3})%\s+\d+:\d\d\s+(.*)$')
-
-
-def build_progress(log):
-    """Latest upstream setup progress for the job card, e.g. 'frame generation 63% (2/4 shaders 120/236)'."""
-    for line in reversed(re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', log or '').replace('\r', '\n').splitlines()):
-        match = _BUILD_LINE.match(line.strip())
-        if not match:
-            continue
-        stage = 'upscaling network' if match.group(1) == 'setup' else 'frame generation'
-        bar = _BUILD_BAR.match(match.group(2))
-        if bar:
-            label = bar.group(2).strip()
-            return stage + ' ' + bar.group(1) + '%' + (' (' + label[:80] + ')' if label else '')
-        return stage + ': ' + match.group(2).strip()[:140]
-    return 'preparing build tools' if (log or '').strip() else None
-
-
-def check_build_exit(returncode, cancelled, log=''):
-    if cancelled:
-        raise ValueError('Cancelled')
-    if returncode != 0:
-        log = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', log[-8000:])
-        if 'no Proton or Wine found' in log:
-            detail = 'Proton or Wine was not found. Install Proton through Steam and retry.'
-        elif 'Permission denied' in log:
-            detail = 'Preparation was denied access. Check the game drive permissions and executable support.'
-        elif 'No space left on device' in log:
-            detail = 'The game drive ran out of space.'
-        else:
-            lines = [line.strip() for line in log.splitlines() if line.strip()]
-            detail = lines[-1][:320] if lines else ''
-        raise ValueError('Network build failed. ' + (detail + ' ' if detail else '') +
-                         'See the build log for details.')
-
-
-def select_build_wine(home, env):
-    """Only override upstream discovery with a Steam runtime that starts on this host."""
-    if platform.system() != 'Linux':
-        return None, []
-    notes = []
-    for candidate in wine_candidates(home)[:12]:
-        try:
-            probe = subprocess.run([str(candidate), '--version'], env=env,
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True,
-                                   encoding='utf-8', errors='replace', timeout=3)
-            output = probe.stdout.strip()
-            if probe.returncode == 0 and re.search(r'^wine-\S+', output, re.MULTILINE):
-                notes.append('Build runtime: ' + str(candidate) + ' (' + output[:120] + ')')
-                return candidate, notes
-            notes.append('Skipped build runtime: ' + str(candidate) + ': ' + output[:200])
-        except (OSError, subprocess.TimeoutExpired) as error:
-            notes.append('Skipped build runtime: ' + str(candidate) + ': ' + str(error)[:200])
-    return None, notes
-
-
-def build_only_script(setup, converter, runtime_override=False):
-    """Keep local network files separate and stop before upstream game writes."""
-    marker = '# --- games ---'
-    invocation = '"$PY" "$PKG/helixsr_setup.py" "$TARGET" --dxc "$DXC" "${PASS[@]}"'
-    if setup.count(marker) != 1:
-        raise ValueError('Upstream setup changed; build-only adapter needs review')
-    script = setup.split(marker)[0]
-    if script.count(invocation) != 1 or '--separate-files' not in converter:
-        raise ValueError('Upstream network output changed; build-only adapter needs review')
-    if runtime_override:
-        wine_start = 'WINE=""\n# official Proton first, then custom Proton builds, then a system Wine'
-        wine_end = '[ -n "$WINE" ] || die "no Proton or Wine found (needed to run the shader compiler); install Proton in Steam or Wine"'
-        wrapper_start = 'cat > "$DXC" <<EOF\n'
-        wrapper_end = '\nEOF\nchmod +x "$DXC"'
-        wrapper_command = 'WINEPREFIX="$DATA/wineprefix" WINEDEBUG=-all exec "$WINE" "$DATA/dxc-win/bin/x64/dxc.exe"'
-        if (script.count(wine_start) != 1 or script.count(wine_end) != 1 or
-                script.count(wrapper_start) != 1 or script.count(wrapper_end) != 1 or
-                script.count(wrapper_command) != 1):
-            raise ValueError('Upstream compiler runtime changed; build-only adapter needs review')
-        script = script.replace(wine_start, 'WINE="${HELIXSR_BUILD_WINE:-}"\n'
-                                'if [ -n "$WINE" ]; then\n'
-                                '    [ -x "$WINE" ] || die "selected Proton or Wine is not executable"\n'
-                                'else\n' + wine_start)
-        script = script.replace(wine_end, wine_end + '\nfi')
-        # A quoted heredoc plus inherited environment keeps arbitrary library
-        # and companion paths out of shell source, including quotes and dollars.
-        begin = script.index(wrapper_start)
-        end = script.index(wrapper_end, begin) + len(wrapper_end)
-        wrapper = r'''export HELIXSR_BUILD_WINE="$WINE" HELIXSR_BUILD_DATA="$DATA"
-cat > "$DXC" <<'HELIXSR_DECKY_DXC'
-#!/usr/bin/env bash
-args=()
-for a in "$@"; do
-    case "$a" in
-        /*) args+=("Z:$(printf '%s' "$a" | tr / '\\')") ;;
-        *) args+=("$a") ;;
-    esac
-done
-WINEPREFIX="$HELIXSR_BUILD_DATA/wineprefix" WINEDEBUG=-all exec "$HELIXSR_BUILD_WINE" "$HELIXSR_BUILD_DATA/dxc-win/bin/x64/dxc.exe" "${args[@]}"
-HELIXSR_DECKY_DXC
-chmod +x "$DXC"'''
-        script = script[:begin] + wrapper + script[end:]
-    # 1.8 embeds the network into its DLL and removes the separate files by default.
-    # Request its supported separate output at the converter, not the shell CLI.
-    return script.replace(invocation, invocation + ' --separate-files') + '\n'
-
-
-def pe_info(path):
-    p = Path(path)
-    s = p.stat()
-    return _pe_info(str(p), s.st_size, s.st_mtime_ns)
-
-
-@lru_cache(maxsize=512)
-def _pe_info(path, size, modified):
-    with Path(path).open('rb') as f:
-        data = f.read(4 << 20)
-    if data[:2] != b'MZ' or len(data) < 64:
-        return dict(arch='not-pe', dx12=False, ffx=False, helix=False)
-    offset = struct.unpack_from('<I', data, 0x3c)[0]
-    arch = 'unknown'
-    if offset + 6 < len(data) and data[offset:offset+4] == b'PE\0\0':
-        machine = struct.unpack_from('<H', data, offset + 4)[0]
-        arch = 'x64' if machine == 0x8664 else 'unsupported'
-    exports, imports = pe_symbols(path, data, offset, size)
-    marker = re.search(rb'HelixSR (\d+\.\d+\.\d+)', data)
-    return dict(arch=arch, dx12='d3d12.dll' in imports,
-                ffx=all(x in exports for x in ['ffxCreateContext', 'ffxDestroyContext', 'ffxDispatch', 'ffxQuery']),
-                helix=bool(marker), hlx_fsr=b'HLX FSR 4 (' in data, helix_version=marker.group(1).decode() if marker else None)
-
-
-def pe_symbols(path, header, offset, size):
-    """Read bounded PE tables by RVA, including tables past the initial scan window."""
-    exports, imports = set(), set()
-    try:
-        if offset + 24 > len(header) or header[offset:offset+4] != b'PE\0\0':
-            return exports, imports
-        sections = struct.unpack_from('<H', header, offset + 6)[0]
-        optional_size = struct.unpack_from('<H', header, offset + 20)[0]
-        optional = offset + 24
-        magic = struct.unpack_from('<H', header, optional)[0]
-        dd = 112 if magic == 0x20b else 96 if magic == 0x10b else 0
-        table = optional + optional_size
-        if not dd or optional_size < dd + 16 or not 1 <= sections <= 96 or table + sections * 40 > len(header):
-            return exports, imports
-        mappings = []
-        for i in range(sections):
-            virtual_size, rva, raw_size, raw = struct.unpack_from('<IIII', header, table + i * 40 + 8)
-            if raw + raw_size > size:
-                return exports, imports
-            mappings.append((rva, raw_size, raw))
-        with Path(path).open('rb') as stream:
-            def read_rva(rva, length):
-                for start, count, raw in mappings:
-                    if start <= rva and rva + length <= start + count:
-                        stream.seek(raw + rva - start)
-                        out = stream.read(length)
-                        if len(out) != length:
-                            raise ValueError('Truncated PE table')
-                        return out
-                raise ValueError('PE RVA outside mapped file data')
-
-            def string_rva(rva):
-                for start, count, raw in mappings:
-                    if start <= rva < start + count:
-                        out = read_rva(rva, min(512, start + count - rva))
-                        if b'\0' not in out:
-                            raise ValueError('Unterminated PE symbol')
-                        return out.split(b'\0', 1)[0].decode('ascii')
-                raise ValueError('PE string RVA outside file')
-
-            export_rva, export_size = struct.unpack_from('<II', header, optional + dd)
-            if export_rva and export_size >= 40:
-                directory = read_rva(export_rva, 40)
-                names_count, names_rva = struct.unpack_from('<II', directory, 24)
-                # Offset28 is AddressOfFunctions; AddressOfNames is offset32.
-                names_rva = struct.unpack_from('<I', directory, 32)[0]
-                if names_count > 8192:
-                    raise ValueError('PE export name limit')
-                names = read_rva(names_rva, names_count * 4) if names_count else b''
-                for i in range(names_count):
-                    exports.add(string_rva(struct.unpack_from('<I', names, i * 4)[0]))
-            import_rva, import_size = struct.unpack_from('<II', header, optional + dd + 8)
-            if import_rva:
-                for i in range(min(import_size // 20, 512)):
-                    entry = read_rva(import_rva + i * 20, 20)
-                    if not any(entry):
-                        break
-                    imports.add(string_rva(struct.unpack_from('<I', entry, 12)[0]).lower())
-    except (ValueError, struct.error, UnicodeError):
-        return set(), set()
-    return exports, imports
-
-
-def checked_path(root, relative):
-    p = Path(root) / relative
-    if Path(relative).is_absolute() or '..' in Path(relative).parts:
-        raise ValueError('Unsafe managed path')
-    current = p
-    while current != Path(root):
-        if current.is_symlink():
-            raise ValueError(f'Symlink in managed path: {relative}')
-        current = current.parent
-    if Path(root).resolve() not in p.resolve().parents:
-        raise ValueError('Managed path escapes game')
-    return p
-
-
-def safe_extract(archive, destination):
-    total, seen = 0, set()
-    with zipfile.ZipFile(archive) as z:
-        if len(z.infolist()) > 30000:
-            raise ValueError('Archive member limit')
-        for info in z.infolist():
-            name = info.filename.replace('\\', '/')
-            p = PurePosixPath(name)
-            normalized = str(p)
-            total += info.file_size
-            if (p.is_absolute() or '..' in p.parts or ':' in name or not p.parts or
-                    stat.S_ISLNK(info.external_attr >> 16) or total > 2 << 30 or normalized in seen or
-                    info.compress_size and info.file_size / info.compress_size > 1000):
-                raise ValueError('Unsafe or oversized release archive')
-            seen.add(normalized)
-            target = Path(destination).joinpath(*p.parts)
-            if info.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(info) as src, target.open('wb') as dst:
-                    shutil.copyfileobj(src, dst)
-                mode = info.external_attr >> 16
-                target.chmod(0o755 if mode & 0o111 else 0o644)
 
 
 class Manager:
@@ -1077,89 +744,15 @@ class Manager:
                 blocked.append('Existing unmanaged injector/configuration: HLX FSR 4 drop-in in ' + ', '.join(dropins)
                                + '. Restore the game\'s original DLL with the tool that installed it, or verify the game files in Steam.')
         if not rec and route == 'optiscaler' and target:
-            occupied = [n for n in ('dxgi.dll', 'winmm.dll', 'version.dll', 'OptiScaler.ini', 'fakenvapi.dll')
-                        if (target / n).exists() or (target / n).is_symlink()]
-            # Other managers can leave OptiScaler under a different supported
-            # alias. Installing dxgi beside it could load two copies. Only
-            # identified aliases conflict; ordinary game d3d12 DLLs are valid.
-            occupied += [p.name for p, _ in names if p.parent == target and
-                         p.name not in occupied and optiscaler_proxy(p)]
-            helix_dir = target / 'HelixSR'
-            # Removal retains runtime logs. An empty/log-only directory contains no injector.
-            if helix_dir.is_symlink() or (helix_dir.exists() and
-                    (not helix_dir.is_dir() or any(p.name.lower() != 'helixsr.log' or
-                     p.is_symlink() or not p.is_file() for p in helix_dir.iterdir()))):
-                occupied.append('HelixSR')
-            if occupied:
-                blocked.append('Existing unmanaged injector/configuration: ' + ', '.join(occupied))
+            message = self._occupied_by_other_injector(target, names)
+            if message:
+                blocked.append(message)
         if legacy:
             reasons.append('Existing direct HelixSR installation: explicit import is required before management')
-        steam_build_review = None
-        restore_eligible = False
-        repair_missing = []
-        repair_conflict = False
+        steam_build_review, restore_eligible, repair_missing, repair_conflict, non_file_blocked = None, False, [], False, []
         if rec:
-            if game.get('build') and rec.get('game_build') and game['build'] != rec['game_build']:
-                blocked.append('Steam build changed; installation needs review')
-                def build_id(value):
-                    return value if isinstance(value, str) and re.fullmatch(r'[0-9]{1,24}', value) else 'unavailable'
-                steam_build_review = dict(recorded_build=build_id(rec['game_build']),
-                                          current_build=build_id(game['build']), files=[],
-                                          omitted_files=max(0, len(rec['current']) - 20))
-            def file_review(rel, state):
-                if steam_build_review is not None and len(steam_build_review['files']) < 20:
-                    steam_build_review['files'].append(dict(path=rel, state=state))
-            mutable = self.mutable_config_paths(game, rec)
-            non_file_blocked = list(blocked)
-            restore_blocked = list(blocked)
-            missing_introduced = []
-            for rel, expected in rec['current'].items():
-                p = checked_path(root, rel)
-                try:
-                    info = p.lstat()
-                except FileNotFoundError:
-                    info = None
-                if info is not None and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
-                    reason = ('Unsafe managed configuration: ' if rel in mutable else
-                              'Unsafe managed file type or hardlink: ') + rel
-                    blocked.append(reason)
-                    restore_blocked.append(reason)
-                    continue
-                absent_introduced = (rec.get('route') == 'optiscaler' and expected is not None
-                                     and rel in rec['baseline'] and rec['baseline'][rel] is None
-                                     and absent_path(p))
-                if rel in mutable:
-                    self.retained_config(rec, rel)
-                    if rec.get('enabled') and expected is not None and not absent_introduced:
-                        try:
-                            self.read_owned_config(game, rel)
-                        except (OSError, ValueError) as exc:
-                            blocked.append(str(exc))
-                            restore_blocked.append(str(exc))
-                        file_review(rel, 'retained configuration')
-                        continue
-                actual = sha(p) if p.is_file() else None
-                file_review(rel, 'missing' if actual is None else
-                            'saved-original bytes match' if actual == rec['baseline'].get(rel) else
-                            'installed bytes match' if actual == expected else 'externally changed')
-                if actual != expected:
-                    state = ('missing' if actual is None else 'matches recorded original'
-                             if actual == rec['baseline'].get(rel) else 'different bytes')
-                    reason = ('Managed files changed; ownership needs review before further changes: '
-                              + rel + ' (current state: ' + state + ')')
-                    blocked.append(reason)
-                    if actual is None and expected is not None:
-                        repair_missing.append(rel)
-                    else:
-                        repair_conflict = True
-                    if absent_introduced:
-                        missing_introduced.append(rel)
-                    else:
-                        restore_blocked.append(reason)
-            # Only cleanup can reconcile already absent files that this install
-            # introduced. Other ownership/build/process guards are unchanged.
-            restore_eligible = bool(missing_introduced and not restore_blocked
-                                    and set(rec['baseline']) == set(rec['current']))
+            (steam_build_review, restore_eligible, repair_missing, repair_conflict,
+             non_file_blocked) = self._audit_record(game, rec, root, blocked)
         # Symlink candidates may hide API files and must never be mutated.
         for p in targets + ([main] if main else []):
             checked_path(root, str(p.relative_to(root)))
@@ -1229,6 +822,97 @@ class Manager:
                     hlx_scaler_reason=(hlx_scaler_reason([p.name for p in targets], bool(rec))
                                        if hlx_direct is False else None),
                     **aware)
+        return self._finish_assessment(game, data, rec, blocked, detailed)
+
+    def _audit_record(self, game, rec, root, blocked):
+        """Compare a managed record with the files on disk; appends reasons to blocked."""
+        steam_build_review = None
+        repair_missing = []
+        repair_conflict = False
+        if game.get('build') and rec.get('game_build') and game['build'] != rec['game_build']:
+            blocked.append('Steam build changed; installation needs review')
+            def build_id(value):
+                return value if isinstance(value, str) and re.fullmatch(r'[0-9]{1,24}', value) else 'unavailable'
+            steam_build_review = dict(recorded_build=build_id(rec['game_build']),
+                                      current_build=build_id(game['build']), files=[],
+                                      omitted_files=max(0, len(rec['current']) - 20))
+        def file_review(rel, state):
+            if steam_build_review is not None and len(steam_build_review['files']) < 20:
+                steam_build_review['files'].append(dict(path=rel, state=state))
+        mutable = self.mutable_config_paths(game, rec)
+        non_file_blocked = list(blocked)
+        restore_blocked = list(blocked)
+        missing_introduced = []
+        for rel, expected in rec['current'].items():
+            p = checked_path(root, rel)
+            try:
+                info = p.lstat()
+            except FileNotFoundError:
+                info = None
+            if info is not None and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+                reason = ('Unsafe managed configuration: ' if rel in mutable else
+                          'Unsafe managed file type or hardlink: ') + rel
+                blocked.append(reason)
+                restore_blocked.append(reason)
+                continue
+            absent_introduced = (rec.get('route') == 'optiscaler' and expected is not None
+                                 and rel in rec['baseline'] and rec['baseline'][rel] is None
+                                 and absent_path(p))
+            if rel in mutable:
+                self.retained_config(rec, rel)
+                if rec.get('enabled') and expected is not None and not absent_introduced:
+                    try:
+                        self.read_owned_config(game, rel)
+                    except (OSError, ValueError) as exc:
+                        blocked.append(str(exc))
+                        restore_blocked.append(str(exc))
+                    file_review(rel, 'retained configuration')
+                    continue
+            actual = sha(p) if p.is_file() else None
+            file_review(rel, 'missing' if actual is None else
+                        'saved-original bytes match' if actual == rec['baseline'].get(rel) else
+                        'installed bytes match' if actual == expected else 'externally changed')
+            if actual != expected:
+                state = ('missing' if actual is None else 'matches recorded original'
+                         if actual == rec['baseline'].get(rel) else 'different bytes')
+                reason = ('Managed files changed; ownership needs review before further changes: '
+                          + rel + ' (current state: ' + state + ')')
+                blocked.append(reason)
+                if actual is None and expected is not None:
+                    repair_missing.append(rel)
+                else:
+                    repair_conflict = True
+                if absent_introduced:
+                    missing_introduced.append(rel)
+                else:
+                    restore_blocked.append(reason)
+        # Only cleanup can reconcile already absent files that this install
+        # introduced. Other ownership/build/process guards are unchanged.
+        restore_eligible = bool(missing_introduced and not restore_blocked
+                                and set(rec['baseline']) == set(rec['current']))
+        return steam_build_review, restore_eligible, repair_missing, repair_conflict, non_file_blocked
+
+    def _occupied_by_other_injector(self, target, names):
+        """Return a blocking reason when another injector already owns the target folder."""
+        occupied = [n for n in ('dxgi.dll', 'winmm.dll', 'version.dll', 'OptiScaler.ini', 'fakenvapi.dll')
+                    if (target / n).exists() or (target / n).is_symlink()]
+        # Other managers can leave OptiScaler under a different supported
+        # alias. Installing dxgi beside it could load two copies. Only
+        # identified aliases conflict; ordinary game d3d12 DLLs are valid.
+        occupied += [p.name for p, _ in names if p.parent == target and
+                     p.name not in occupied and optiscaler_proxy(p)]
+        helix_dir = target / 'HelixSR'
+        # Removal retains runtime logs. An empty/log-only directory contains no injector.
+        if helix_dir.is_symlink() or (helix_dir.exists() and
+                (not helix_dir.is_dir() or any(p.name.lower() != 'helixsr.log' or
+                 p.is_symlink() or not p.is_file() for p in helix_dir.iterdir()))):
+            occupied.append('HelixSR')
+        if occupied:
+            return 'Existing unmanaged injector/configuration: ' + ', '.join(occupied)
+        return ''
+
+    def _finish_assessment(self, game, data, rec, blocked, detailed):
+        """Add reset, status, guidance, menu and settings fields to an assessment."""
         if not detailed:
             data.pop('logs', None)
         data.update(reset_eligible=False, reset_files=[], reset_preserved_files=[], reset_reason=None)
@@ -1470,18 +1154,6 @@ class Manager:
                   and now < pause <= now + 86400
                   and old.get('api_limit_kind') in ('primary', 'secondary', 'blocked'))
         if paused:
-            if old['api_limit_kind'] == 'primary':
-                web_retry = old.get('web_retry_at')
-                if (type(web_retry) in (int, float) and math.isfinite(web_retry)
-                        and now < web_retry <= now + 86400):
-                    return old
-                # Avoid repeated page requests from rapid clicks while retaining a
-                # freshly verified result across application restarts.
-                if (valid_cache and not old.get('error')
-                        and type(old.get('checked_at')) in (int, float)
-                        and 0 <= now - old['checked_at'] < 30):
-                    return old
-                return self._web_update(old, valid_cache, pause)
             return old
         headers = {'User-Agent': 'HelixSR-Decky/0.1', 'Accept': 'application/vnd.github+json'}
         if valid_cache and isinstance(old.get('etag'), str):
@@ -1515,6 +1187,9 @@ class Manager:
                                metadata_source='github-api',
                                asset_id=asset.get('id'), asset_updated_at=asset.get('updated_at'))
                 validate_release(current)
+                # Network metadata is untrusted: accept only releases whose exact identity was reviewed.
+                if parse_version(release_version) <= (1, 8, 1):
+                    validate_compatible_release({key: current[key] for key in ('version', 'url', 'page', 'sha256', 'size')})
                 atomic_json(self.settings / 'release.json', current)
                 return current
         except urllib.error.HTTPError as e:
@@ -1526,10 +1201,8 @@ class Manager:
             if e.code in (403, 429):
                 kind, retry_at = github_pause(e, now)
                 old.update(api_limit_kind=kind, api_retry_at=retry_at)
-                if kind == 'primary':
-                    return self._web_update(old, valid_cache, retry_at)
                 old['error'] = (f'GitHub returned HTTP {e.code}; '
-                                + ('its request limit is active. ' if kind == 'secondary'
+                                + ('its request limit is active. ' if kind in ('primary', 'secondary')
                                    else 'access to its update API was denied. ')
                                 + 'Retry later; reconnecting may not help.')
             else:
@@ -1541,34 +1214,6 @@ class Manager:
         old['failed_at'] = time.time()
         atomic_json(self.settings / 'release.json', old)
         return old
-
-    def _web_update(self, old, valid_cache, retry_at):
-        now = time.time()
-        web_retry = old.get('web_retry_at')
-        if (type(web_retry) in (int, float) and math.isfinite(web_retry)
-                and now < web_retry <= now + 86400):
-            old.update(api_limit_kind='primary', api_retry_at=retry_at)
-            atomic_json(self.settings / 'release.json', old)
-            return old
-        try:
-            current = web_latest_release(context=https_context())
-            validate_release(current)
-            current.update(checked_at=time.time(), etag=None, error=None,
-                           metadata_policy=RELEASE_POLICY, metadata_source='github-web',
-                           api_limit_kind='primary', api_retry_at=retry_at)
-            atomic_json(self.settings / 'release.json', current)
-            return current
-        except (OSError, ValueError, TypeError, KeyError, http.client.HTTPException) as error:
-            failed = dict(old) if valid_cache else {}
-            now = time.time()
-            web_retry = now + 30
-            if isinstance(error, urllib.error.HTTPError) and error.code in (403, 429):
-                _, web_retry = github_pause(error, now)
-            failed.update(error=f'GitHub API request limit reached; official release verification failed: {error}',
-                          failed_at=now, api_limit_kind='primary', api_retry_at=retry_at,
-                          web_retry_at=web_retry)
-            atomic_json(self.settings / 'release.json', failed)
-            return failed
 
     def preview_latest(self, gid, dx12_confirmed=False, variant_id=None, executable=None, release_choice=None):
         with self.lock:
@@ -2366,36 +2011,7 @@ class Manager:
         self.transaction = (root, tx, journal)
         try:
             if reset_plan is not None:
-                # Archive before retiring the receipt. Originals remain in place
-                # until commit, so rollback never depends on the archive.
-                archive = self.archive_reset(game, previous, reset_plan)
-                if self.reset_plan(game, data, previous, in_transaction=True) != reset_plan:
-                    raise ValueError('Game changed during reset; refresh and review again')
-                for rel in reset_plan['remove']:
-                    path = checked_path(root, rel)
-                    self.reset_file_hash(path)
-                    # The plan proved these bytes: the recorded install, or an edited Scaler config now archived.
-                    if sha(path) != reset_plan['live'][rel]:
-                        raise ValueError('Reset file changed before cleanup: ' + rel)
-                    self.unlink_managed(path)
-                for rel, expected in before.items():
-                    actual = self.reset_file_hash(checked_path(root, rel))
-                    if actual != (None if rel in reset_plan['remove'] else expected):
-                        raise ValueError('Game changed during reset: ' + rel)
-                self.record_path(game).unlink()
-                sync_directory(self.record_path(game).parent)
-                current = {rel: self.reset_file_hash(checked_path(root, rel)) for rel in paths}
-                next_step = ('Refresh, then install HelixSR again.' if reset_plan['route'] == 'optiscaler'
-                             else 'Verify game files in Steam, refresh, then reinstall HelixSR.')
-                atomic_json(archive / 'result.json', dict(action='reset', verified=current, next_step=next_step))
-                journal.update(state='committed', committed_current=current, committed_record=None)
-                atomic_json(tx / 'journal.json', journal)
-                self.transaction = None
-                shutil.rmtree(tx)
-                return dict(message=('HelixSR setup reset. The old Scaler files are removed; refresh, then install HelixSR again.'
-                                     if reset_plan['route'] == 'optiscaler' else
-                                     'HelixSR setup reset. Verify game files in Steam, refresh, then install HelixSR again.'),
-                            enabled=False, version=None)
+                return self._reset_transaction(game, data, paths, before, previous, reset_plan, journal, tx, root)
             if not previous:
                 baseline = {}
                 for rel in paths:
@@ -2411,89 +2027,7 @@ class Manager:
                     # Most games load OptiScaler as dxgi.dll; a few need another name (scaler_proxy.py).
                     if scaler_proxy.for_game(game) != scaler_proxy.DEFAULT:
                         previous['proxy'] = scaler_proxy.for_game(game)
-            if label_plan:
-                rel = label_plan['path']
-                expected = (menu_labels.digest(label_plan['original']) if action == 'labels_enable'
-                            else previous['current'][rel])
-                if before[rel] != expected or sha(root / rel) != before[rel]:
-                    raise ValueError('Menu resource changed during transaction')
-                if rel not in previous['baseline']:
-                    if before[rel] is None:
-                        raise ValueError('Menu original disappeared before transaction')
-                    original_path = self.checked_menu_original(game, rel)
-                    if original_path.exists():
-                        if menu_labels.digest(menu_labels.read_resource(original_path)) != before[rel]:
-                            raise ValueError('Menu original backup conflicts with current source')
-                    else:
-                        journal['new_menu_original'] = dict(path=rel, sha256=before[rel])
-                        atomic_json(tx / 'journal.json', journal)
-                        durable_copy(root / rel, original_path, before[rel])
-                    previous['baseline'][rel] = before[rel]
-                self.write_managed_bytes(root / rel, label_plan['payload'])
-                previous['menu_labels'] = dict(enabled=action == 'labels_enable',
-                    profile=label_plan['profile'], path=rel,
-                    original_sha256=previous['baseline'][rel],
-                    patched_sha256=(menu_labels.digest(label_plan['payload']) if action == 'labels_enable'
-                                    else previous['menu_labels']['patched_sha256']))
-            elif action == 'settings':
-                if not settings or settings[0] not in self.mutable_config_paths(game, previous):
-                    raise ValueError('Invalid settings transaction')
-                self.write_managed(root / settings[0], settings[1])
-                previous.setdefault('saved_configs', {})[settings[0]] = dict(
-                    content=settings[1], sha256=hashlib.sha256(settings[1].encode('utf-8')).hexdigest())
-            elif action == 'adopt':
-                # Baseline restores native DLL and removes only identified Helix payload.
-                for target in map(Path, data['targets']):
-                    rel = str(target.relative_to(root))
-                    orig = target.with_name(target.stem + '.original.dll')
-                    dst = companion / 'originals' / rel
-                    durable_copy(orig, dst)
-                    previous['baseline'][rel] = sha(orig)
-                    previous['baseline'][str(orig.relative_to(root))] = None
-                    for n in NETWORK + ('helixsr-install.json',):
-                        previous['baseline'][str((target.parent / n).relative_to(root))] = None
-                previous['enabled'], previous['version'] = True, 'legacy'
-            elif action in ('disable', 'remove'):
-                if action == 'disable' and not previous.get('package_selection'):
-                    # Preserve a legacy enabled installation's exact cache before
-                    # restoring its baseline. Already-disabled ambiguous records
-                    # require an explicit update instead of a guessed upgrade.
-                    with contextlib.suppress(ValueError, OSError, TypeError, KeyError):
-                        installed = self.package(game, data['route'], installed=previous)
-                        if installed:
-                            previous['package_selection'] = package_selection(installed[2])
-                self.retain_configs(game, previous, action)
-                self.restore_baseline(game, previous)
-                previous['enabled'] = False
-                if isinstance(previous.get('menu_labels'), dict):
-                    previous['menu_labels']['enabled'] = False
-            elif action == 'repair':
-                if not package:
-                    raise ValueError('Exact installed package is unavailable; repair cannot continue')
-                missing = self.repair_plan(game, previous, package, data.get('repair_files', []))
-                self.repair_payload(game, previous, package, missing)
-                for rel in missing:
-                    if sha(checked_path(root, rel)) != previous['current'][rel]:
-                        raise ValueError('Repaired file hash does not match installation record: ' + rel)
-            elif action in ('install', 'update', 'enable'):
-                if not package:
-                    raise ValueError('Prepared package unavailable')
-                self.retain_configs(game, previous, action)
-                previous['enabled'], previous['version'] = True, package[2]['version']
-                if package[2].get('variant'):
-                    previous['variant'] = package[2]['variant']
-                else:
-                    previous.pop('variant', None)
-                previous['package_selection'] = package_selection(package[2])
-                previous['release_sha256'] = package[2].get('release_sha256')
-                # Extend older managed records for newly introduced dependencies.
-                # Their paths were conflict-checked, snapshotted and journaled above.
-                for rel in paths:
-                    previous['baseline'].setdefault(rel, before[rel])
-                if helix20_release.modern(package[2]) or hlx_fsr_release.modern(package[2]):
-                    self.install_payload(game, data, previous, package, previous_version=(journal.get('previous') or {}).get('version'))
-                else:
-                    self.install_payload(game, data, previous, package)
+            self._apply_action(game, data, action, package, settings, label_plan, root, companion, tx, journal, previous, before, paths)
             if (action in ('install', 'update') and data['route'] == 'optiscaler'
                     and dx12_confirmed):
                 previous['dx12_confirmation'] = dict(
@@ -2530,6 +2064,125 @@ class Manager:
             self.transaction = None
             self.rollback(game)
             raise
+
+    def _reset_transaction(self, game, data, paths, before, previous, reset_plan, journal, tx, root):
+        """Retire the receipt and managed files of a stale setup inside the open transaction."""
+        # Archive before retiring the receipt. Originals remain in place
+        # until commit, so rollback never depends on the archive.
+        archive = self.archive_reset(game, previous, reset_plan)
+        if self.reset_plan(game, data, previous, in_transaction=True) != reset_plan:
+            raise ValueError('Game changed during reset; refresh and review again')
+        for rel in reset_plan['remove']:
+            path = checked_path(root, rel)
+            self.reset_file_hash(path)
+            # The plan proved these bytes: the recorded install, or an edited Scaler config now archived.
+            if sha(path) != reset_plan['live'][rel]:
+                raise ValueError('Reset file changed before cleanup: ' + rel)
+            self.unlink_managed(path)
+        for rel, expected in before.items():
+            actual = self.reset_file_hash(checked_path(root, rel))
+            if actual != (None if rel in reset_plan['remove'] else expected):
+                raise ValueError('Game changed during reset: ' + rel)
+        self.record_path(game).unlink()
+        sync_directory(self.record_path(game).parent)
+        current = {rel: self.reset_file_hash(checked_path(root, rel)) for rel in paths}
+        next_step = ('Refresh, then install HelixSR again.' if reset_plan['route'] == 'optiscaler'
+                     else 'Verify game files in Steam, refresh, then reinstall HelixSR.')
+        atomic_json(archive / 'result.json', dict(action='reset', verified=current, next_step=next_step))
+        journal.update(state='committed', committed_current=current, committed_record=None)
+        atomic_json(tx / 'journal.json', journal)
+        self.transaction = None
+        shutil.rmtree(tx)
+        return dict(message=('HelixSR setup reset. The old Scaler files are removed; refresh, then install HelixSR again.'
+                             if reset_plan['route'] == 'optiscaler' else
+                             'HelixSR setup reset. Verify game files in Steam, refresh, then install HelixSR again.'),
+                    enabled=False, version=None)
+
+    def _apply_action(self, game, data, action, package, settings, label_plan, root, companion, tx, journal, previous, before, paths):
+        """Change files and the in-memory record for one action; mutates previous and journal."""
+        if label_plan:
+            rel = label_plan['path']
+            expected = (menu_labels.digest(label_plan['original']) if action == 'labels_enable'
+                        else previous['current'][rel])
+            if before[rel] != expected or sha(root / rel) != before[rel]:
+                raise ValueError('Menu resource changed during transaction')
+            if rel not in previous['baseline']:
+                if before[rel] is None:
+                    raise ValueError('Menu original disappeared before transaction')
+                original_path = self.checked_menu_original(game, rel)
+                if original_path.exists():
+                    if menu_labels.digest(menu_labels.read_resource(original_path)) != before[rel]:
+                        raise ValueError('Menu original backup conflicts with current source')
+                else:
+                    journal['new_menu_original'] = dict(path=rel, sha256=before[rel])
+                    atomic_json(tx / 'journal.json', journal)
+                    durable_copy(root / rel, original_path, before[rel])
+                previous['baseline'][rel] = before[rel]
+            self.write_managed_bytes(root / rel, label_plan['payload'])
+            previous['menu_labels'] = dict(enabled=action == 'labels_enable',
+                profile=label_plan['profile'], path=rel,
+                original_sha256=previous['baseline'][rel],
+                patched_sha256=(menu_labels.digest(label_plan['payload']) if action == 'labels_enable'
+                                else previous['menu_labels']['patched_sha256']))
+        elif action == 'settings':
+            if not settings or settings[0] not in self.mutable_config_paths(game, previous):
+                raise ValueError('Invalid settings transaction')
+            self.write_managed(root / settings[0], settings[1])
+            previous.setdefault('saved_configs', {})[settings[0]] = dict(
+                content=settings[1], sha256=hashlib.sha256(settings[1].encode('utf-8')).hexdigest())
+        elif action == 'adopt':
+            # Baseline restores native DLL and removes only identified Helix payload.
+            for target in map(Path, data['targets']):
+                rel = str(target.relative_to(root))
+                orig = target.with_name(target.stem + '.original.dll')
+                dst = companion / 'originals' / rel
+                durable_copy(orig, dst)
+                previous['baseline'][rel] = sha(orig)
+                previous['baseline'][str(orig.relative_to(root))] = None
+                for n in NETWORK + ('helixsr-install.json',):
+                    previous['baseline'][str((target.parent / n).relative_to(root))] = None
+            previous['enabled'], previous['version'] = True, 'legacy'
+        elif action in ('disable', 'remove'):
+            if action == 'disable' and not previous.get('package_selection'):
+                # Preserve a legacy enabled installation's exact cache before
+                # restoring its baseline. Already-disabled ambiguous records
+                # require an explicit update instead of a guessed upgrade.
+                with contextlib.suppress(ValueError, OSError, TypeError, KeyError):
+                    installed = self.package(game, data['route'], installed=previous)
+                    if installed:
+                        previous['package_selection'] = package_selection(installed[2])
+            self.retain_configs(game, previous, action)
+            self.restore_baseline(game, previous)
+            previous['enabled'] = False
+            if isinstance(previous.get('menu_labels'), dict):
+                previous['menu_labels']['enabled'] = False
+        elif action == 'repair':
+            if not package:
+                raise ValueError('Exact installed package is unavailable; repair cannot continue')
+            missing = self.repair_plan(game, previous, package, data.get('repair_files', []))
+            self.repair_payload(game, previous, package, missing)
+            for rel in missing:
+                if sha(checked_path(root, rel)) != previous['current'][rel]:
+                    raise ValueError('Repaired file hash does not match installation record: ' + rel)
+        elif action in ('install', 'update', 'enable'):
+            if not package:
+                raise ValueError('Prepared package unavailable')
+            self.retain_configs(game, previous, action)
+            previous['enabled'], previous['version'] = True, package[2]['version']
+            if package[2].get('variant'):
+                previous['variant'] = package[2]['variant']
+            else:
+                previous.pop('variant', None)
+            previous['package_selection'] = package_selection(package[2])
+            previous['release_sha256'] = package[2].get('release_sha256')
+            # Extend older managed records for newly introduced dependencies.
+            # Their paths were conflict-checked, snapshotted and journaled above.
+            for rel in paths:
+                previous['baseline'].setdefault(rel, before[rel])
+            if helix20_release.modern(package[2]) or hlx_fsr_release.modern(package[2]):
+                self.install_payload(game, data, previous, package, previous_version=(journal.get('previous') or {}).get('version'))
+            else:
+                self.install_payload(game, data, previous, package)
 
     def track_write(self, path, digest):
         if self.transaction is None:

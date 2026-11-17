@@ -15,7 +15,7 @@ import zipfile
 
 from manager import atomic_json, https_context
 
-REPO = 'dawoodtogoo2020-code/HelixSR-Decky'
+REPO = 'snooptheone/HelixSR-Decky'
 PAGE = f'https://github.com/{REPO}/releases'
 API = f'https://api.github.com/repos/{REPO}/releases?per_page=30'
 INTERVAL = 24 * 60 * 60
@@ -23,6 +23,12 @@ RETRY = 60 * 60
 MAX_ARCHIVE = 16 << 20
 PLUGIN_NAME = 'HelixSR Decky'
 FOLDER = 'HelixSR-Decky'
+REQUIRED_FILES = ('main.py', 'plugin.json', 'package.json', 'dist/index.js')
+REQUIRED_MODULES = (
+    'manager', 'library', 'awareness', 'plugin_updates', 'optiscaler_setup', 'launch_receipts',
+    'operation_lock', 'host_environment', 'model_variants', 'build_runtime',
+    'compatibility_release', 'build_tools', 'pe_info', 'fileops', 'modern_build', 'modern_release', 'helix20_release', 'helix_settings',
+    'discovery_records', 'hlx_fsr_release', 'reframework')
 
 
 def semver(value):
@@ -84,35 +90,8 @@ def validate_zip(path, version):
             seen.add(canonical.rstrip('/'))
             if not item.is_dir() and stat.S_IFMT(item.external_attr >> 16) in (0, stat.S_IFREG):
                 files.add(canonical)
-        required = {f'{FOLDER}/{name}' for name in ('main.py', 'plugin.json', 'package.json', 'dist/index.js')}
-        required.update(f'{FOLDER}/py_modules/{name}.py' for name in ('manager', 'library', 'awareness'))
-        if semver(version) >= (0, 1, 1):
-            required.add(f'{FOLDER}/py_modules/plugin_updates.py')
-        if semver(version) >= (0, 1, 6):
-            required.update(f'{FOLDER}/py_modules/{name}.py' for name in
-                            ('optiscaler_setup', 'launch_receipts', 'operation_lock', 'host_environment'))
-        if semver(version) >= (0, 1, 9):
-            required.update(f'{FOLDER}/py_modules/{name}.py' for name in ('model_variants', 'build_runtime'))
-        if semver(version) >= (0, 1, 14):
-            required.update(f'{FOLDER}/py_modules/{name}.py' for name in
-                            ('github_release', '_helix_html', '_helix_html_parser',
-                             '_helix_html_entities', '_helix_markupbase'))
-            required.update(f'{FOLDER}/licenses/{name}' for name in
-                            ('cpython-3.11.17-LICENSE.txt', 'cpython-3.11.17-PROVENANCE.json'))
-        if semver(version) >= (0, 1, 29):
-            required.add(f'{FOLDER}/py_modules/compatibility_release.py')
-        if semver(version) >= (0, 1, 30):
-            required.update(f'{FOLDER}/py_modules/{name}.py' for name in
-                            ('modern_build', 'modern_release'))
-        if semver(version) >= (0, 1, 31):
-            required.update(f'{FOLDER}/py_modules/{name}.py' for name in
-                            ('helix20_release', 'helix_settings'))
-        if semver(version) >= (0, 1, 32):
-            required.add(f'{FOLDER}/py_modules/discovery_records.py')
-        if semver(version) >= (0, 1, 37):
-            required.update(f'{FOLDER}/py_modules/{name}.py' for name in ('hlx_fsr_release', 'windows_processes'))
-        if semver(version) >= (0, 1, 44):
-            required.add(f'{FOLDER}/py_modules/reframework.py')
+        required = {f'{FOLDER}/{name}' for name in REQUIRED_FILES}
+        required.update(f'{FOLDER}/py_modules/{name}.py' for name in REQUIRED_MODULES)
         if not required <= files:
             raise ValueError('Incomplete plugin ZIP')
         for name in ('plugin.json', 'package.json'):
@@ -179,38 +158,44 @@ class PluginUpdates:
             if not force and not self.due():
                 return self.status()
             self.attempted_at = now
-            try:
-                request = urllib.request.Request(API, headers={'Accept': 'application/vnd.github+json',
-                    'User-Agent': f'HelixSR-Decky/{self.current}', 'X-GitHub-Api-Version': '2022-11-28'})
-                with urllib.request.urlopen(request, timeout=20, context=https_context()) as response:
-                    if response.geturl() != API:
-                        raise ValueError('Unexpected plugin metadata redirect')
-                    raw = response.read((1 << 20) + 1)
-                if len(raw) > 1 << 20:
-                    raise ValueError('Plugin metadata too large')
-                releases = json.loads(raw)
-                if not isinstance(releases, list):
-                    raise ValueError('Invalid plugin release feed')
-                candidates = []
-                for item in releases:
-                    try:
-                        candidates.append(release_info(item))
-                    except (ValueError, TypeError):
-                        continue
-                if not candidates:
-                    raise ValueError('No numbered plugin release with a verified ZIP digest is available')
-                self.release = max(candidates, key=lambda r: semver(r['version']))
-                self.checked_at = now
-                self.error = ''
-            except (OSError, ValueError, TypeError) as exc:
-                self.error = f'Plugin update check failed: {exc}'
+        # The request runs outside the lock so status calls stay responsive.
+        try:
+            request = urllib.request.Request(API, headers={'Accept': 'application/vnd.github+json',
+                'User-Agent': f'HelixSR-Decky/{self.current}', 'X-GitHub-Api-Version': '2022-11-28'})
+            with urllib.request.urlopen(request, timeout=20, context=https_context()) as response:
+                if response.geturl() != API:
+                    raise ValueError('Unexpected plugin metadata redirect')
+                raw = response.read((1 << 20) + 1)
+            if len(raw) > 1 << 20:
+                raise ValueError('Plugin metadata too large')
+            releases = json.loads(raw)
+            if not isinstance(releases, list):
+                raise ValueError('Invalid plugin release feed')
+            candidates = []
+            for item in releases:
+                try:
+                    candidates.append(release_info(item))
+                except (ValueError, TypeError):
+                    continue
+            if releases and not candidates:
+                raise ValueError('No numbered plugin release with a verified ZIP digest is available')
+            latest = max(candidates, key=lambda r: semver(r['version']), default=None)
+            error = ''
+        except (OSError, ValueError, TypeError) as exc:
+            latest, error = None, f'Plugin update check failed: {exc}'
+        with self.lock:
+            if not error:
+                # A repository without releases is simply up to date.
+                self.release, self.checked_at = latest, now
+            self.error = error
             return self.status()
 
     def prepare(self):
         with self.lock:
             if self.pending:
                 raise ValueError('A plugin update is already awaiting Decky confirmation')
-            status = self.check(True)
+        status = self.check(True)
+        with self.lock:
             if status['error'] or not status['update_available']:
                 raise ValueError(status['error'] or 'The installed plugin is up to date')
             release = dict(self.release)
@@ -243,35 +228,37 @@ class PluginUpdates:
                 # The exact private staging filename belongs to this updater.
                 # A failed cached artifact must not permanently block retries.
                 cached.unlink()
-            # One UUID isolates this private file; repeating the release digest and
-            # destination UUID can exceed the host filename/path limit.
-            temporary = self.stage / ('.download-' + uuid.uuid4().hex)
-            try:
-                request = urllib.request.Request(release['url'], headers={'User-Agent': f'HelixSR-Decky/{self.current}'})
-                digest, count = hashlib.sha256(), 0
-                with urllib.request.urlopen(request, timeout=30, context=https_context()) as response:
-                    parsed = urlsplit(response.geturl())
-                    if parsed.scheme != 'https' or parsed.hostname not in ('github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com'):
-                        raise ValueError('Unexpected plugin download host')
-                    with temporary.open('xb') as output:
-                        while chunk := response.read(1 << 20):
-                            count += len(chunk)
-                            if count > release['size']:
-                                raise ValueError('Plugin download exceeds its declared size')
-                            digest.update(chunk)
-                            output.write(chunk)
-                        output.flush()
-                        os.fsync(output.fileno())
-                if count != release['size'] or digest.hexdigest() != release['sha256']:
-                    raise ValueError('Plugin update SHA-256 or size mismatch')
-                validate_zip(temporary, release['version'])
+        # One UUID isolates this private file; repeating the release digest and
+        # destination UUID can exceed the host filename/path limit. The download
+        # runs outside the lock; the caller serializes prepare calls.
+        temporary = self.stage / ('.download-' + uuid.uuid4().hex)
+        try:
+            request = urllib.request.Request(release['url'], headers={'User-Agent': f'HelixSR-Decky/{self.current}'})
+            digest, count = hashlib.sha256(), 0
+            with urllib.request.urlopen(request, timeout=30, context=https_context()) as response:
+                parsed = urlsplit(response.geturl())
+                if parsed.scheme != 'https' or parsed.hostname not in ('github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com'):
+                    raise ValueError('Unexpected plugin download host')
+                with temporary.open('xb') as output:
+                    while chunk := response.read(1 << 20):
+                        count += len(chunk)
+                        if count > release['size']:
+                            raise ValueError('Plugin download exceeds its declared size')
+                        digest.update(chunk)
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+            if count != release['size'] or digest.hexdigest() != release['sha256']:
+                raise ValueError('Plugin update SHA-256 or size mismatch')
+            validate_zip(temporary, release['version'])
+            with self.lock:
                 os.replace(temporary, destination)
                 self.pending = destination
                 self.pending_release = release
                 # Decky's local artifact protocol uses a raw absolute filesystem path.
                 return self.artifact(release)
-            finally:
-                temporary.unlink(missing_ok=True)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def artifact(self, release):
         return dict(artifact='file://' + str(self.pending), name=PLUGIN_NAME,

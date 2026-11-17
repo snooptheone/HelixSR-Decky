@@ -91,7 +91,7 @@ def check_release(release_dir, version=None, source_root=ROOT):
         if manifest.get('type') != 'module':
             raise ValueError('Runtime package must declare ESM module type')
     _check_source(release_dir / source, version)
-    url = (f'https://github.com/dawoodtogoo2020-code/HelixSR-Decky/releases/'
+    url = (f'https://github.com/snooptheone/HelixSR-Decky/releases/'
            f'download/v{version}/{runtime}')
     for name in ('README.md', 'INSTALL_GUIDE.md'):
         if url not in (source_root / name).read_text(encoding='utf-8'):

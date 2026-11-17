@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'py_modules'))
+import fileops
 import manager
 from test_backend import Fixtures
 
@@ -102,7 +103,7 @@ class RecoveryDurability(Fixtures):
     def test_new_directory_entries_and_file_are_synced(self):
         destination = self.base / 'new' / 'nested' / 'native.dll'
         calls = []
-        with patch.object(manager, 'sync_directory', side_effect=lambda p: calls.append(Path(p))), patch.object(manager.os, 'fsync') as fsync:
+        with patch.object(fileops, 'sync_directory', side_effect=lambda p: calls.append(Path(p))), patch.object(manager.os, 'fsync') as fsync:
             manager.durable_copy(self.native, destination)
         self.assertEqual(calls, [self.base, self.base / 'new', destination.parent])
         fsync.assert_called_once()

@@ -12,6 +12,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+sys.path.insert(0, str(ROOT / 'py_modules'))
+import plugin_updates
 from check_release import check_release, SOURCE_PREFIX, SOURCE_REQUIRED
 
 
@@ -26,7 +28,7 @@ class ReleasePackageTests(unittest.TestCase):
         self.runtime = self.release / f'HelixSR-Decky-{self.version}.zip'
         self.source = self.release / f'HelixSR-Decky-{self.version}-source.tar.gz'
         (self.root / 'package.json').write_text(json.dumps({'version': self.version}))
-        url = (f'https://github.com/dawoodtogoo2020-code/HelixSR-Decky/releases/'
+        url = (f'https://github.com/snooptheone/HelixSR-Decky/releases/'
                f'download/v{self.version}/{self.runtime.name}')
         for name in ('README.md', 'INSTALL_GUIDE.md'):
             (self.root / name).write_text(f'[Install runtime]({url})\n')
@@ -35,18 +37,13 @@ class ReleasePackageTests(unittest.TestCase):
         self.hashes()
 
     def make_runtime(self, omit=(), module_type='module'):
-        modules = ('manager', 'library', 'awareness', 'plugin_updates', 'optiscaler_setup',
-                   'launch_receipts', 'operation_lock', 'host_environment', 'model_variants',
-                   'build_runtime', 'github_release', '_helix_html', '_helix_html_parser',
-                   '_helix_html_entities', '_helix_markupbase')
+        modules = plugin_updates.REQUIRED_MODULES
         entries = {f'py_modules/{name}.py': b'# fixture\n' for name in modules}
         entries.update({
             'main.py': b'pass\n', 'dist/index.js': b'export {};\n',
             'plugin.json': json.dumps({'name': 'HelixSR Decky', 'flags': [], 'api_version': 1}).encode(),
             'package.json': json.dumps({'name': 'helixsr-decky', 'version': self.version,
                                        'type': module_type}).encode(),
-            'licenses/cpython-3.11.17-LICENSE.txt': b'fixture license',
-            'licenses/cpython-3.11.17-PROVENANCE.json': b'{}',
         })
         with zipfile.ZipFile(self.runtime, 'w') as archive:
             for name, data in entries.items():

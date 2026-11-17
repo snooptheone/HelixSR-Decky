@@ -1096,8 +1096,8 @@ function Content() {
           <p>Administrator access is unnecessary for writable folders owned by you.</p>
           <p>Disable and Remove restore the original game files. Unsupported renderers and protected games cannot be made compatible by administrator access.</p></div>} />))}>
         Installation guide</ButtonItem></PanelSectionRow>
-      <PanelSectionRow><ButtonItem layout="below" disabled={modalOpen} onClick={() => SteamClient.System.OpenInSystemBrowser("https://github.com/dawoodtogoo2020-code/HelixSR-Decky/blob/main/INSTALL_GUIDE.md")}>Open full guide</ButtonItem></PanelSectionRow>
-      <PanelSectionRow><ButtonItem layout="below" disabled={modalOpen} onClick={() => SteamClient.System.OpenInSystemBrowser("https://github.com/dawoodtogoo2020-code/HelixSR-Decky/issues/new?template=bug_report.yml")}>Report a problem</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={modalOpen} onClick={() => SteamClient.System.OpenInSystemBrowser("https://github.com/snooptheone/HelixSR-Decky/blob/main/INSTALL_GUIDE.md")}>Open full guide</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={modalOpen} onClick={() => SteamClient.System.OpenInSystemBrowser("https://github.com/snooptheone/HelixSR-Decky/issues/new?template=bug_report.yml")}>Report a problem</ButtonItem></PanelSectionRow>
       <PanelSectionRow><div className="helix-muted">Accept preparation terms in the selected game's installation review. Consent applies to that release, archive and model. Generated network files stay on this device.</div></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" onClick={() => SteamClient.System.OpenInSystemBrowser(`https://github.com/lonewolf0622/HelixSR/blob/${releaseChoice === "latest" ? "main" : "v" + releaseChoice.split("-")[1]}/LICENSE`)}>Read HelixSR license</ButtonItem></PanelSectionRow>
       {selectedModel?.source_license_url && <PanelSectionRow><ButtonItem layout="below" onClick={() => SteamClient.System.OpenInSystemBrowser(selectedModel.source_license_url!)}>Read {selectedModel.source} license</ButtonItem></PanelSectionRow>}

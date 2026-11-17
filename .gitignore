@@ -9,3 +9,4 @@ __pycache__/
 build-desktop/
 release-desktop/
 desktop-*-smoke.png
+.claude/

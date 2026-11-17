@@ -461,7 +461,7 @@ class DesktopWidgetTests(unittest.TestCase):
         self.window.game['main_exe'] = '/fixture/a/Game.exe'
         self.window.game['optiscaler']['setup'] = dict(checks=['DLSS input is disabled', 'Frame generation is separate'],
             settings={'EnableDlssInputs': 'false', 'ShortcutKey': '0x24'},
-            guide='https://github.com/dawoodtogoo2020-code/HelixSR-Decky/blob/main/OPTISCALER_GUIDE.md')
+            guide='https://github.com/snooptheone/HelixSR-Decky/blob/main/OPTISCALER_GUIDE.md')
         self.window._render_game()
         text = self.window.evidence.toPlainText()
         self.assertIn('Target executable: /fixture/a/Game.exe', text)
@@ -709,12 +709,6 @@ class DesktopWidgetTests(unittest.TestCase):
             open_external_url('https://github.com/example/issues')
             self.assertEqual(launch.call_args.args[0], ['/usr/bin/xdg-open', 'https://github.com/example/issues'])
             self.assertIs(launch.call_args.kwargs['env'], clean)
-        with mock.patch('desktop.app.sys.platform', 'win32'), \
-             mock.patch('desktop.app.system_environment', return_value={'WINDIR': 'D:/Windows'}), \
-             mock.patch('desktop.app.subprocess.CREATE_NO_WINDOW', 0, create=True), \
-             mock.patch('desktop.app.subprocess.Popen') as launch:
-            open_external_url('https://github.com/example/issues')
-            self.assertTrue(launch.call_args.args[0][0].endswith('explorer.exe'))
         for bad in ('file:///tmp/a', 'javascript:alert(1)', 'https://user:pass@example.com', 'https://example.com/\ncmd'):
             with self.assertRaises(ValueError):
                 open_external_url(bad)

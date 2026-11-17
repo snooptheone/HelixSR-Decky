@@ -15,7 +15,7 @@ import uuid
 from manager import atomic_json, https_context
 from .version import VERSION
 
-REPO = 'dawoodtogoo2020-code/HelixSR-Decky'
+REPO = 'snooptheone/HelixSR-Decky'
 PAGE = f'https://github.com/{REPO}/releases'
 API = f'https://api.github.com/repos/{REPO}/releases?per_page=100'
 MAX_IMAGE = 512 << 20
@@ -27,6 +27,14 @@ def semver(value):
     if not isinstance(value, str) or not re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', value):
         raise ValueError('Invalid desktop version')
     return tuple(map(int, value.split('.')))
+
+
+def check_appimage(path):
+    """A type 2 AppImage is an ELF file whose header carries the bytes 'AI\\x02' at offset 8."""
+    with open(path, 'rb') as stream:
+        head = stream.read(11)
+    if head[:4] != b'\x7fELF' or head[8:11] != b'AI\x02':
+        raise ValueError('Desktop download is not a type 2 AppImage')
 
 
 def release_info(item):
@@ -97,35 +105,41 @@ class AppUpdates:
             if not force and (not self.enabled or now - self.attempted_at < RETRY or now - self.checked_at < INTERVAL):
                 return self.status()
             self.attempted_at = now
-            try:
-                request = urllib.request.Request(API, headers={'Accept': 'application/vnd.github+json',
-                    'User-Agent': f'HelixSR-Desktop/{self.current}', 'X-GitHub-Api-Version': '2022-11-28'})
-                with urllib.request.urlopen(request, timeout=20, context=https_context()) as response:
-                    if response.geturl() != API:
-                        raise ValueError('Unexpected desktop metadata redirect')
-                    raw = response.read((4 << 20) + 1)
-                if len(raw) > 4 << 20:
-                    raise ValueError('Desktop metadata too large')
-                items = json.loads(raw)
-                if not isinstance(items, list):
-                    raise ValueError('Invalid desktop release feed')
-                candidates = []
-                for item in items:
-                    try:
-                        candidates.append(release_info(item))
-                    except (ValueError, TypeError):
-                        continue
-                if not candidates:
-                    raise ValueError('No official desktop release with a verified AppImage digest is available')
-                self.release = max(candidates, key=lambda x: semver(x['version']))
-                self.checked_at, self.error = now, ''
-            except (OSError, ValueError, TypeError, http.client.HTTPException) as exc:
-                self.error = f'Desktop update check failed: {exc}'
+        # The request runs outside the lock so status calls stay responsive.
+        try:
+            request = urllib.request.Request(API, headers={'Accept': 'application/vnd.github+json',
+                'User-Agent': f'HelixSR-Desktop/{self.current}', 'X-GitHub-Api-Version': '2022-11-28'})
+            with urllib.request.urlopen(request, timeout=20, context=https_context()) as response:
+                if response.geturl() != API:
+                    raise ValueError('Unexpected desktop metadata redirect')
+                raw = response.read((4 << 20) + 1)
+            if len(raw) > 4 << 20:
+                raise ValueError('Desktop metadata too large')
+            items = json.loads(raw)
+            if not isinstance(items, list):
+                raise ValueError('Invalid desktop release feed')
+            candidates = []
+            for item in items:
+                try:
+                    candidates.append(release_info(item))
+                except (ValueError, TypeError):
+                    continue
+            if items and not candidates:
+                raise ValueError('No official desktop release with a verified AppImage digest is available')
+            latest = max(candidates, key=lambda x: semver(x['version']), default=None)
+            error = ''
+        except (OSError, ValueError, TypeError, http.client.HTTPException) as exc:
+            latest, error = None, f'Desktop update check failed: {exc}'
+        with self.lock:
+            if not error:
+                # A repository without releases is simply up to date.
+                self.release, self.checked_at = latest, now
+            self.error = error
             return self.status()
 
     def download(self):
+        status = self.check(True)
         with self.lock:
-            status = self.check(True)
             if status['error'] or not status['update_available']:
                 raise ValueError(status['error'] or 'The desktop application is up to date')
             release = dict(self.release)
@@ -136,28 +150,30 @@ class AppUpdates:
                 raise ValueError('Not enough space to download the desktop AppImage')
             destination = self.stage / (release['filename'] + '-' + uuid.uuid4().hex + '.AppImage')
             temporary = self.stage / ('.download-' + uuid.uuid4().hex)
-            try:
-                request = urllib.request.Request(release['url'], headers={'User-Agent': f'HelixSR-Desktop/{self.current}'})
-                digest, count = hashlib.sha256(), 0
-                with urllib.request.urlopen(request, timeout=30, context=https_context()) as response:
-                    parsed = urlsplit(response.geturl())
-                    if (parsed.scheme != 'https' or parsed.hostname not in
-                            ('github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com')
-                            or parsed.username or parsed.password or parsed.port not in (None, 443)):
-                        raise ValueError('Unexpected desktop download host')
-                    with temporary.open('xb') as output:
-                        while chunk := response.read(1 << 20):
-                            count += len(chunk)
-                            if count > release['size']:
-                                raise ValueError('Desktop download exceeds its declared size')
-                            digest.update(chunk)
-                            output.write(chunk)
-                        output.flush()
-                        os.fsync(output.fileno())
-                if count != release['size'] or digest.hexdigest() != release['sha256']:
-                    raise ValueError('Desktop update SHA-256 or size mismatch')
-                os.chmod(temporary, 0o700)
-                os.replace(temporary, destination)
-                return dict(path=str(destination), version=release['version'], sha256=release['sha256'], size=count)
-            finally:
-                temporary.unlink(missing_ok=True)
+        # The download runs outside the lock. Each call writes its own uuid-named files, so overlapping calls do not collide.
+        try:
+            request = urllib.request.Request(release['url'], headers={'User-Agent': f'HelixSR-Desktop/{self.current}'})
+            digest, count = hashlib.sha256(), 0
+            with urllib.request.urlopen(request, timeout=30, context=https_context()) as response:
+                parsed = urlsplit(response.geturl())
+                if (parsed.scheme != 'https' or parsed.hostname not in
+                        ('github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com')
+                        or parsed.username or parsed.password or parsed.port not in (None, 443)):
+                    raise ValueError('Unexpected desktop download host')
+                with temporary.open('xb') as output:
+                    while chunk := response.read(1 << 20):
+                        count += len(chunk)
+                        if count > release['size']:
+                            raise ValueError('Desktop download exceeds its declared size')
+                        digest.update(chunk)
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+            if count != release['size'] or digest.hexdigest() != release['sha256']:
+                raise ValueError('Desktop update SHA-256 or size mismatch')
+            check_appimage(temporary)
+            os.chmod(temporary, 0o700)
+            os.replace(temporary, destination)
+            return dict(path=str(destination), version=release['version'], sha256=release['sha256'], size=count)
+        finally:
+            temporary.unlink(missing_ok=True)
