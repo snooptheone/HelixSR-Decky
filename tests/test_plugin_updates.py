@@ -227,6 +227,18 @@ class SchedulingAndNetworkTests(PluginUpdateFixtures):
         with self.assertRaises(ValueError):
             updater.set_auto(1)
 
+    def test_feed_without_plugin_releases_is_up_to_date_unless_a_plugin_tag_is_broken(self):
+        desktop = dict(release("0.1.1"), tag_name="desktop-v0.1.1")
+        broken = release("0.1.1", digest="bad")
+        for feed, expected in (([], ""), ([desktop], ""), ([broken], "No numbered plugin release")):
+            with self.subTest(feed=feed):
+                response = FakeResponse(json.dumps(feed).encode(), plugin_updates.API)
+                with patch("plugin_updates.urllib.request.urlopen", return_value=response):
+                    status = self.updater().check(force=True)
+                self.assertFalse(status["update_available"])
+                self.assertIn(expected, status["error"])
+                self.assertEqual(bool(status["error"]), bool(expected))
+
     def test_network_failure_preserves_last_successful_release_and_check_time(self):
         updater = self.updater()
         item = release("0.1.1")

@@ -27,7 +27,7 @@ REQUIRED_FILES = ('main.py', 'plugin.json', 'package.json', 'dist/index.js')
 REQUIRED_MODULES = (
     'manager', 'library', 'awareness', 'plugin_updates', 'optiscaler_setup', 'launch_receipts',
     'operation_lock', 'host_environment', 'model_variants', 'build_runtime',
-    'compatibility_release', 'build_tools', 'pe_info', 'fileops', 'modern_build', 'modern_release', 'helix20_release', 'helix_settings',
+    'compatibility_release', 'build_tools', 'pe_info', 'fileops', 'release_metadata', 'modern_build', 'modern_release', 'helix20_release', 'helix_settings',
     'discovery_records', 'hlx_fsr_release', 'reframework')
 
 
@@ -177,7 +177,8 @@ class PluginUpdates:
                     candidates.append(release_info(item))
                 except (ValueError, TypeError):
                     continue
-            if releases and not candidates:
+            # Releases of other kinds (the desktop's) are not an error; a plugin tag with no valid asset is.
+            if not candidates and any(isinstance(x, dict) and str(x.get('tag_name', '')).startswith('v') for x in releases):
                 raise ValueError('No numbered plugin release with a verified ZIP digest is available')
             latest = max(candidates, key=lambda r: semver(r['version']), default=None)
             error = ''

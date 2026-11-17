@@ -50,3 +50,24 @@ jobs:
             release/HelixSR-Decky-*-source.tar.gz
             release/SHA256SUMS
           if-no-files-found: error
+  publish:
+    # A tag like v0.1.51 publishes exactly what the validate job built and tested.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download the validated package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name HelixSR-Decky --dir release
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          zip="release/HelixSR-Decky-${GITHUB_REF_NAME#v}.zip"
+          test -f "$zip" || { echo "Tag $GITHUB_REF_NAME does not match the package version"; exit 1; }
+          gh release create "$GITHUB_REF_NAME" "$zip" release/HelixSR-Decky-*-source.tar.gz release/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "HelixSR Decky ${GITHUB_REF_NAME#v}" --generate-notes

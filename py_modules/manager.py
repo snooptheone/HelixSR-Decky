@@ -34,6 +34,8 @@ import hlx_fsr_release
 import scaler_proxy
 from build_tools import BUILD_IDLE_SECONDS, BUILD_LIMIT_SECONDS, BUILD_MESSAGE, BUILD_PREPARATION_NOTE, COPY_MESSAGE, HLX_PREPARATION_NOTE, REUSE_MESSAGE, _BUILD_BAR, _BUILD_LINE, build_only_script, build_progress, check_build_exit, select_build_wine
 from pe_info import pe_info
+from release_metadata import (API, REPO, RELEASE_POLICY, check_update, github_pause, load_release,
+                              validate_release, version)
 from fileops import _confirmed_executable_sha, atomic_json, checked_path, confirmed_executable_sha, durable_copy, durable_directory, https_context, load_json, safe_extract, sha, sync_directory
 
 def release_adapter(record):
@@ -62,8 +64,6 @@ from compatibility_release import (COMPATIBLE_CHOICE, selection,
 from model_variants import (DEFAULT_VARIANT, catalog, package_selection, same_release,
                             select_variant, valid_variant, variant_label, verify_recipe, verify_outputs)
 
-REPO = 'lonewolf0622/HelixSR'
-API = f'https://api.github.com/repos/{REPO}/releases/latest'
 DLL = 'amd_fidelityfx_dx12.dll'
 NETWORK = ('helixsr_weights.bin', 'helixsr_kernels.pak')
 AMD_FG = 'amd_fidelityfx_framegeneration_dx12.dll'
@@ -92,53 +92,8 @@ def absent_path(path):
 # Official Steam requirements: https://store.steampowered.com/app/1593500/
 DX11_ONLY_STEAM_APPS = {'1593500': 'God of War (2018)'}
 LICENSE_REV = 'helixsr-local-nvidia-network-2026-10'
-RELEASE_POLICY = 2
 AUTO_PACKAGE = object()
 CONFIG_LIMIT = 1 << 20
-
-
-def github_pause(error, now):
-    """Honor server backoff headers from a GitHub API rate-limit or abuse response."""
-    headers = error.headers or {}
-    retry = headers.get('Retry-After')
-    if retry is not None or error.code == 429:
-        try:
-            delay = float(retry) if str(retry).isdigit() else parsedate_to_datetime(retry).timestamp() - now
-        except (TypeError, ValueError, OverflowError):
-            delay = 60
-        if not math.isfinite(delay):
-            delay = 60
-        return 'secondary', now + min(86400, max(60, delay))
-    if error.code == 403 and headers.get('X-RateLimit-Remaining') == '0':
-        try:
-            reset = float(headers.get('X-RateLimit-Reset'))
-            if math.isfinite(reset) and now < reset <= now + 86400:
-                return 'primary', reset
-        except (TypeError, ValueError):
-            pass
-    return 'blocked', now + 60
-
-
-def load_release(settings):
-    try:
-        value = load_json(Path(settings) / 'release.json')
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def validate_release(release):
-    if not isinstance(release, dict):
-        raise ValueError('Invalid upstream release metadata')
-    tag = 'v' + release.get('version', '') if isinstance(release.get('version'), str) else ''
-    version(tag)
-    digest, size = release.get('sha256'), release.get('size')
-    if (not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest)
-            or type(size) is not int or not 0 < size <= 512 << 20
-            or release.get('url') != f'https://github.com/{REPO}/releases/download/{tag}/HelixSR-{tag[1:]}.zip'
-            or release.get('page') != f'https://github.com/{REPO}/releases/tag/{tag}'):
-        raise ValueError('Invalid official release URL, size or SHA256 digest')
-    return release
 
 
 def license_key(release, variant_id=None):
@@ -178,11 +133,7 @@ def direct_backup(target, record):
     return target.with_name(target.stem + '.original.dll')
 
 
-def version(value):
-    m = re.fullmatch(r'v?(\d+)\.(\d+)\.(\d+)', value)
-    if not m:
-        raise ValueError('Only stable semantic-version releases are supported')
-    return tuple(map(int, m.groups()))
+
 
 
 class Manager:
@@ -735,14 +686,7 @@ class Manager:
             blocked.append('Game is running; close it before any file changes')
         legacy = bool(direct_legacy and not rec)
         if not rec and route == 'direct' and not legacy:
-            # Upstream's manual HLX FSR 4 drop-in renames the game's DLL to .amd.dll.
-            if any(p.with_name(p.stem + suffix).exists() for p in targets for suffix in ('.original.dll', '.amd.dll')):
-                blocked.append('Unmanaged original DLL backup exists; review it before installation')
-            # Any model would otherwise save another installer's HLX DLL as the game's original.
-            dropins = [p.name for p in probe_targets if pe_info(p).get('hlx_fsr')]
-            if dropins:
-                blocked.append('Existing unmanaged injector/configuration: HLX FSR 4 drop-in in ' + ', '.join(dropins)
-                               + '. Restore the game\'s original DLL with the tool that installed it, or verify the game files in Steam.')
+            blocked.extend(self._unmanaged_direct_conflicts(targets, probe_targets))
         if not rec and route == 'optiscaler' and target:
             message = self._occupied_by_other_injector(target, names)
             if message:
@@ -779,24 +723,8 @@ class Manager:
         # A library row needs compatibility and recorded installation state,
         # not a cross-library search and rehash of every prepared model. Details
         # and every mutation retain the full, fresh package verification.
-        installed_id = rec['variant']['id'] if valid_variant(rec.get('variant')) else None
-        package = self.package(game, route, variant_id=installed_id) if detailed else None
-        repair_package = (self.package(game, route, variant_id=installed_id, selection=rec.get('package_selection'),
-                                       installed=rec if not rec.get('package_selection') else None)
-                          if detailed and rec and rec.get('enabled') and repair_missing
-                          and not repair_conflict and not non_file_blocked else None)
-        repair_files = []
-        repair_reason = None
-        if (rec and rec.get('enabled') and repair_missing and not repair_conflict
-                and not non_file_blocked and repair_package):
-            try:
-                repair_files = self.repair_plan(game, rec, repair_package, repair_missing)
-            except (ValueError, OSError, TypeError, KeyError) as exc:
-                repair_reason = str(exc)
-        if (detailed and rec and rec.get('enabled') and repair_missing
-                and not repair_conflict and not non_file_blocked and not repair_files):
-            blocked.append(repair_reason or
-                           'Exact installed package is unavailable or changed; repair needs the recorded checksum-verified package')
+        package, repair_files = self._plan_repair(game, route, rec, detailed, repair_missing, repair_conflict,
+                                                  non_file_blocked, blocked)
         # HLX FSR 4 replaces only the split FSR 3.1 upscaler DLL. Older combined DLLs need Scaler.
         hlx_direct = (all(p.name.lower() == HLX_SPLIT_DLL for p in targets) if route == 'direct' and targets else None)
         data = dict(game, compatibility='blocked' if blocked else 'unsupported' if dx11_title else 'candidate' if route else 'unsupported',
@@ -935,6 +863,42 @@ class Manager:
             data['helix_settings'] = self.game_settings(game, rec)
             data['reframework'] = reframework.status(game, data, self.companion(game))
         return data
+
+    def _plan_repair(self, game, route, rec, detailed, repair_missing, repair_conflict, non_file_blocked, blocked):
+        """Return the prepared package and the files a repair would restore; blocks when it cannot be proven."""
+        installed_id = rec['variant']['id'] if valid_variant(rec.get('variant')) else None
+        package = self.package(game, route, variant_id=installed_id) if detailed else None
+        repair_package = (self.package(game, route, variant_id=installed_id, selection=rec.get('package_selection'),
+                                       installed=rec if not rec.get('package_selection') else None)
+                          if detailed and rec and rec.get('enabled') and repair_missing
+                          and not repair_conflict and not non_file_blocked else None)
+        repair_files = []
+        repair_reason = None
+        if (rec and rec.get('enabled') and repair_missing and not repair_conflict
+                and not non_file_blocked and repair_package):
+            try:
+                repair_files = self.repair_plan(game, rec, repair_package, repair_missing)
+            except (ValueError, OSError, TypeError, KeyError) as exc:
+                repair_reason = str(exc)
+        if (detailed and rec and rec.get('enabled') and repair_missing
+                and not repair_conflict and not non_file_blocked and not repair_files):
+            blocked.append(repair_reason or
+                           'Exact installed package is unavailable or changed; repair needs the recorded checksum-verified package')
+        return package, repair_files
+
+    @staticmethod
+    def _unmanaged_direct_conflicts(targets, probe_targets):
+        """Return reasons an unmanaged native DLL backup or HLX FSR 4 drop-in blocks installation."""
+        found = []
+        # Upstream's manual HLX FSR 4 drop-in renames the game's DLL to .amd.dll.
+        if any(p.with_name(p.stem + suffix).exists() for p in targets for suffix in ('.original.dll', '.amd.dll')):
+            found.append('Unmanaged original DLL backup exists; review it before installation')
+        # Any model would otherwise save another installer's HLX DLL as the game's original.
+        dropins = [p.name for p in probe_targets if pe_info(p).get('hlx_fsr')]
+        if dropins:
+            found.append('Existing unmanaged injector/configuration: HLX FSR 4 drop-in in ' + ', '.join(dropins)
+                           + '. Restore the game\'s original DLL with the tool that installed it, or verify the game files in Steam.')
+        return found
 
     def game_settings(self, game, rec=None):
         rec = self.record(game) if rec is None else rec
@@ -1137,83 +1101,7 @@ class Manager:
         return release
 
     def check_update(self, force=False):
-        old = load_release(self.settings)
-        now = time.time()
-        valid_cache = False
-        try:
-            validate_release(old)
-            valid_cache = old.get('metadata_policy') == RELEASE_POLICY
-        except (ValueError, TypeError):
-            pass
-        if (not force and valid_cache and not old.get('error')
-                and isinstance(old.get('checked_at'), (int, float))
-                and 0 <= now - old['checked_at'] < 6 * 3600):
-            return old
-        pause = old.get('api_retry_at')
-        paused = (type(pause) in (int, float) and math.isfinite(pause)
-                  and now < pause <= now + 86400
-                  and old.get('api_limit_kind') in ('primary', 'secondary', 'blocked'))
-        if paused:
-            return old
-        headers = {'User-Agent': 'HelixSR-Decky/0.1', 'Accept': 'application/vnd.github+json'}
-        if valid_cache and isinstance(old.get('etag'), str):
-            headers['If-None-Match'] = old['etag']
-        try:
-            with urllib.request.urlopen(urllib.request.Request(API, headers=headers), timeout=20, context=https_context()) as response:
-                if response.geturl() != API:
-                    raise ValueError('Unexpected upstream metadata redirect')
-                raw = response.read((2 << 20) + 1)
-                if len(raw) > 2 << 20:
-                    raise ValueError('Upstream metadata is too large')
-                data = json.loads(raw)
-                if not isinstance(data, dict) or data.get('draft') or data.get('prerelease'):
-                    raise ValueError('Expected an official stable HelixSR release')
-                tag = data['tag_name']
-                if not isinstance(tag, str):
-                    raise ValueError('Invalid release tag')
-                version(tag)
-                release_version = tag.removeprefix('v')
-                if not isinstance(data.get('assets'), list):
-                    raise ValueError('Invalid upstream assets')
-                asset = next((x for x in data['assets'] if isinstance(x, dict)
-                              and x.get('name') == f'HelixSR-{release_version}.zip'), None)
-                if (not asset or not isinstance(asset.get('digest'), str)
-                        or not re.fullmatch(r'sha256:[a-fA-F0-9]{64}', asset['digest'])):
-                    raise ValueError('Official release lacks a usable SHA256 asset digest')
-                current = dict(version=release_version, url=asset['browser_download_url'],
-                               sha256=asset['digest'][7:].lower(), size=asset['size'],
-                               checked_at=time.time(), etag=response.headers.get('ETag'),
-                               page=data['html_url'], error=None, metadata_policy=RELEASE_POLICY,
-                               metadata_source='github-api',
-                               asset_id=asset.get('id'), asset_updated_at=asset.get('updated_at'))
-                validate_release(current)
-                # Network metadata is untrusted: accept only releases whose exact identity was reviewed.
-                if parse_version(release_version) <= (1, 8, 1):
-                    validate_compatible_release({key: current[key] for key in ('version', 'url', 'page', 'sha256', 'size')})
-                atomic_json(self.settings / 'release.json', current)
-                return current
-        except urllib.error.HTTPError as e:
-            if e.code == 304 and valid_cache:
-                old['checked_at'], old['error'] = time.time(), None
-                old.pop('failed_at', None)
-                atomic_json(self.settings / 'release.json', old)
-                return old
-            if e.code in (403, 429):
-                kind, retry_at = github_pause(e, now)
-                old.update(api_limit_kind=kind, api_retry_at=retry_at)
-                old['error'] = (f'GitHub returned HTTP {e.code}; '
-                                + ('its request limit is active. ' if kind in ('primary', 'secondary')
-                                   else 'access to its update API was denied. ')
-                                + 'Retry later; reconnecting may not help.')
-            else:
-                old['error'] = f'GitHub returned HTTP {e.code}; retry later to check the latest HelixSR'
-        except (OSError, ValueError, TypeError, KeyError, http.client.HTTPException) as e:
-            old['error'] = str(e)
-        if not valid_cache:
-            old = {key: old[key] for key in ('error', 'api_retry_at', 'api_limit_kind') if key in old}
-        old['failed_at'] = time.time()
-        atomic_json(self.settings / 'release.json', old)
-        return old
+        return check_update(self.settings, force)
 
     def preview_latest(self, gid, dx12_confirmed=False, variant_id=None, executable=None, release_choice=None):
         with self.lock:
@@ -1627,44 +1515,7 @@ class Manager:
             logfile.parent.mkdir(parents=True, exist_ok=True)
             job['message'] = BUILD_MESSAGE
             notes = ([job['copy_note']] if job.get('copy_note') else []) + runtime_notes
-            with logfile.open('wb') as output:
-                if notes:
-                    output.write(('\n'.join(notes) + '\n').encode('utf-8'))
-                    output.flush()
-                self._spawn_compiler(['bash', str(build), '--yes'], cwd=package, env=env,
-                                                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                                                start_new_session=True)
-                # A Steam Deck build can legitimately take longer than a desktop one; stop
-                # only when the upstream setup stops writing output, or at a generous ceiling.
-                started = last_output = time.monotonic()
-                logged = -1
-                while self.process.poll() is None:
-                    job['log'] = text_tail(logfile, 8000)
-                    progress = build_progress(job['log'])
-                    job['message'] = BUILD_MESSAGE + (' Progress: ' + progress if progress else '')
-                    now = time.monotonic()
-                    with contextlib.suppress(OSError):
-                        if logfile.stat().st_size != logged:
-                            logged, last_output = logfile.stat().st_size, now
-                    stalled = now - last_output > BUILD_IDLE_SECONDS
-                    if self.cancel.is_set() or stalled or now - started > BUILD_LIMIT_SECONDS:
-                        import signal
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(self.process.pid, signal.SIGTERM)
-                        try:
-                            self.process.wait(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            with contextlib.suppress(ProcessLookupError):
-                                os.killpg(self.process.pid, signal.SIGKILL)
-                            self.process.wait()
-                        raise ValueError('Cancelled' if self.cancel.is_set() else
-                                         'Build timed out: no build output for %d minutes. See the build log.'
-                                         % (BUILD_IDLE_SECONDS // 60) if stalled else
-                                         'Build timed out after %d minutes. See the build log.'
-                                         % (BUILD_LIMIT_SECONDS // 60))
-                    time.sleep(0.5)
-                job['log'] = text_tail(logfile, 8000)
-                check_build_exit(self.process.returncode, self.cancel.is_set(), job['log'])
+            self._run_build(build, package, env, logfile, notes, job)
             if self.cancel.is_set():
                 raise ValueError('Cancelled')
             for name in (() if helix20_release.modern(release) else NETWORK):
@@ -1676,6 +1527,47 @@ class Manager:
             else:
                 verify_outputs(package)
         return model
+
+    def _run_build(self, build, package, env, logfile, notes, job):
+        """Run the local build script, stop it when cancelled, idle or over time, and check its exit."""
+        with logfile.open('wb') as output:
+            if notes:
+                output.write(('\n'.join(notes) + '\n').encode('utf-8'))
+                output.flush()
+            self._spawn_compiler(['bash', str(build), '--yes'], cwd=package, env=env,
+                                            stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                                            start_new_session=True)
+            # A Steam Deck build can legitimately take longer than a desktop one; stop
+            # only when the upstream setup stops writing output, or at a generous ceiling.
+            started = last_output = time.monotonic()
+            logged = -1
+            while self.process.poll() is None:
+                job['log'] = text_tail(logfile, 8000)
+                progress = build_progress(job['log'])
+                job['message'] = BUILD_MESSAGE + (' Progress: ' + progress if progress else '')
+                now = time.monotonic()
+                with contextlib.suppress(OSError):
+                    if logfile.stat().st_size != logged:
+                        logged, last_output = logfile.stat().st_size, now
+                stalled = now - last_output > BUILD_IDLE_SECONDS
+                if self.cancel.is_set() or stalled or now - started > BUILD_LIMIT_SECONDS:
+                    import signal
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(self.process.pid, signal.SIGTERM)
+                    try:
+                        self.process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(self.process.pid, signal.SIGKILL)
+                        self.process.wait()
+                    raise ValueError('Cancelled' if self.cancel.is_set() else
+                                     'Build timed out: no build output for %d minutes. See the build log.'
+                                     % (BUILD_IDLE_SECONDS // 60) if stalled else
+                                     'Build timed out after %d minutes. See the build log.'
+                                     % (BUILD_LIMIT_SECONDS // 60))
+                time.sleep(0.5)
+            job['log'] = text_tail(logfile, 8000)
+            check_build_exit(self.process.returncode, self.cancel.is_set(), job['log'])
 
     @staticmethod
     def action_compatible(data, action):
@@ -1698,20 +1590,7 @@ class Manager:
             if action not in ('install', 'update', 'enable', 'disable', 'remove', 'adopt', 'recover', 'repair', 'reset') + menu_labels.ACTIONS:
                 raise ValueError('Unknown action')
             if action == 'recover':
-                journal = self.companion(game) / 'transaction/journal.json'
-                if not journal.exists():
-                    raise ValueError('No interrupted transaction')
-                saved = load_json(journal)
-                self.menu_change_guard(game, saved.get('before', {}))
-                token = uuid.uuid4().hex
-                self.previews[token] = dict(game=gid, action=action, fingerprint=None,
-                                           expires=time.time()+120, dx12=False)
-                saved = load_json(journal)
-                return dict(token=token, action=action, name=game['name'],
-                            route=(saved.get('previous') or {}).get('route', 'previous configuration'),
-                            files=list(saved.get('before', {})),
-                            select_upscaler='previous configuration',
-                            warning='Recover the interrupted transaction before any new installation.')
+                return self._preview_recover(game, gid, action)
             data = self.assess(game, executable=executable)
             rec = self.record(game)
             self.menu_change_guard(game, rec.get('baseline', {}))
@@ -1732,20 +1611,7 @@ class Manager:
             if data['legacy'] and action != 'adopt':
                 raise ValueError('Import existing direct installation first')
             if action in ('install', 'update', 'enable', 'repair'):
-                if 'variant' in rec and not valid_variant(rec['variant']):
-                    raise ValueError('Installed model identity needs review; use Update HelixSR with a supported model or remove it')
-                package = self.package(game, data['route'],
-                                       variant_id=rec['variant']['id'] if valid_variant(rec.get('variant')) else None,
-                                       selection=rec.get('package_selection') if action in ('enable', 'repair') else None,
-                                       installed=rec if action in ('enable', 'repair') and not rec.get('package_selection') else None)
-                if not package:
-                    raise ValueError('Exact installed package is unavailable; use Update HelixSR and review the change'
-                                     if action in ('enable', 'repair') else 'Prepare HelixSR on this drive first')
-                if not self._verify_package_payloads(package, data['route']):
-                    raise ValueError('Prepared package manifest is incomplete or changed. Rebuild required.')
-                for n, expected in package[2]['files'].items():
-                    if sha(package[1] / n) != expected:
-                        raise ValueError('Prepared package changed. Rebuild required.')
+                package = self._verified_package(game, data, rec, action)
             if action == 'install' and rec:
                 raise ValueError('Already managed; use update or enable')
             if action in ('disable', 'enable', 'remove', 'update') and not rec:
@@ -1773,29 +1639,68 @@ class Manager:
                                self.planned_paths(game, data, action, package)),
                         preserved_files=data.get('reset_preserved_files', []) if action == 'reset' else [],
                         select_upscaler=(menu_labels.LABEL if action == 'labels_enable' else 'AMD FSR') if data['route'] == 'direct' else 'DLSS (or XeSS/FSR input)',
-                        warning=(self.native_install_warning(data) if action == 'install' else '') +
-                                (('Reset the old HelixSR setup after the game update without restoring old game files. '
-                                  'Only files added by HelixSR are removed: the Scaler files and their settings. '
-                                  'A Scaler settings file you changed after installation is saved in the reset archive first. '
-                                  'The game\'s own files are not changed. The old record is archived. '
-                                  'Then refresh and install HelixSR again before playing.'
-                                  if data['route'] == 'optiscaler' else
-                                  'Reset the old HelixSR setup without restoring old game files. '
-                                  'Only unchanged files added by HelixSR are removed. Existing game files are kept as-is; '
-                                  'this does not verify that they are original. The old record and saved originals are archived. '
-                                  'Then verify game files in Steam, refresh, and install HelixSR again before playing.')
-                                 if action == 'reset' else
-                                 'Cosmetic menu label only; it does not prove HelixSR is running. '
-                                 'Close the game. Original menu bytes are restored when this option or HelixSR is disabled. '
-                                 'Quality modes and frame-generation labels are unchanged.' if action in menu_labels.ACTIONS else
-                                 'Close the game. Originals are retained for disable/remove. '
-                                 'Owned OptiScaler configuration edits are preserved in installation records; '
-                                 'enable restores them and update pins only HelixSR backend/provider paths. '
-                                 'Game settings, overlay hotkeys and frame-generation choices are preserved.'
-                                 if data['route'] == 'optiscaler' else
-                                 'Close the game. Originals are retained for disable/remove. '
-                                 'Game settings and frame generation are not changed.'),
+                        warning=self._preview_warning(data, action),
                         expires_at=time.time()+120)
+
+    def _preview_recover(self, game, gid, action):
+        """Preview recovery of an interrupted transaction."""
+        journal = self.companion(game) / 'transaction/journal.json'
+        if not journal.exists():
+            raise ValueError('No interrupted transaction')
+        saved = load_json(journal)
+        self.menu_change_guard(game, saved.get('before', {}))
+        token = uuid.uuid4().hex
+        self.previews[token] = dict(game=gid, action=action, fingerprint=None,
+                                   expires=time.time()+120, dx12=False)
+        saved = load_json(journal)
+        return dict(token=token, action=action, name=game['name'],
+                    route=(saved.get('previous') or {}).get('route', 'previous configuration'),
+                    files=list(saved.get('before', {})),
+                    select_upscaler='previous configuration',
+                    warning='Recover the interrupted transaction before any new installation.')
+
+    def _verified_package(self, game, data, rec, action):
+        """Return the prepared package for an install-like action after checking its manifest and file hashes."""
+        if 'variant' in rec and not valid_variant(rec['variant']):
+            raise ValueError('Installed model identity needs review; use Update HelixSR with a supported model or remove it')
+        package = self.package(game, data['route'],
+                               variant_id=rec['variant']['id'] if valid_variant(rec.get('variant')) else None,
+                               selection=rec.get('package_selection') if action in ('enable', 'repair') else None,
+                               installed=rec if action in ('enable', 'repair') and not rec.get('package_selection') else None)
+        if not package:
+            raise ValueError('Exact installed package is unavailable; use Update HelixSR and review the change'
+                             if action in ('enable', 'repair') else 'Prepare HelixSR on this drive first')
+        if not self._verify_package_payloads(package, data['route']):
+            raise ValueError('Prepared package manifest is incomplete or changed. Rebuild required.')
+        for n, expected in package[2]['files'].items():
+            if sha(package[1] / n) != expected:
+                raise ValueError('Prepared package changed. Rebuild required.')
+        return package
+
+    def _preview_warning(self, data, action):
+        """Text shown with a preview: what the action changes and what it keeps."""
+        return ((self.native_install_warning(data) if action == 'install' else '') +
+                        (('Reset the old HelixSR setup after the game update without restoring old game files. '
+                          'Only files added by HelixSR are removed: the Scaler files and their settings. '
+                          'A Scaler settings file you changed after installation is saved in the reset archive first. '
+                          'The game\'s own files are not changed. The old record is archived. '
+                          'Then refresh and install HelixSR again before playing.'
+                          if data['route'] == 'optiscaler' else
+                          'Reset the old HelixSR setup without restoring old game files. '
+                          'Only unchanged files added by HelixSR are removed. Existing game files are kept as-is; '
+                          'this does not verify that they are original. The old record and saved originals are archived. '
+                          'Then verify game files in Steam, refresh, and install HelixSR again before playing.')
+                         if action == 'reset' else
+                         'Cosmetic menu label only; it does not prove HelixSR is running. '
+                         'Close the game. Original menu bytes are restored when this option or HelixSR is disabled. '
+                         'Quality modes and frame-generation labels are unchanged.' if action in menu_labels.ACTIONS else
+                         'Close the game. Originals are retained for disable/remove. '
+                         'Owned OptiScaler configuration edits are preserved in installation records; '
+                         'enable restores them and update pins only HelixSR backend/provider paths. '
+                         'Game settings, overlay hotkeys and frame-generation choices are preserved.'
+                         if data['route'] == 'optiscaler' else
+                         'Close the game. Originals are retained for disable/remove. '
+                         'Game settings and frame generation are not changed.'))
 
     def validate_install_executable(self, data):
         if data['route'] == 'optiscaler' and (not data.get('main_exe')

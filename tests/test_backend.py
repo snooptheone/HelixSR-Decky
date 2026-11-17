@@ -827,7 +827,7 @@ class ReleaseMetadataTests(Fixtures):
         response.url = page
         response.__enter__.return_value = response
         error = manager.urllib.error.HTTPError(manager.API, 403, 'Fixture quota', {}, None)
-        with patch('manager.https_context', return_value=None), \
+        with patch('release_metadata.https_context', return_value=None), \
                 patch('manager.urllib.request.urlopen', side_effect=[error]) as requests:
             release = self.m.check_update(force=True)
         self.assertEqual(requests.call_count, 1)

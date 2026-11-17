@@ -124,7 +124,8 @@ class AppUpdates:
                     candidates.append(release_info(item))
                 except (ValueError, TypeError):
                     continue
-            if items and not candidates:
+            # Releases of other kinds (the plugin's) are not an error; a desktop tag with no valid asset is.
+            if not candidates and any(isinstance(x, dict) and str(x.get('tag_name', '')).startswith('desktop-v') for x in items):
                 raise ValueError('No official desktop release with a verified AppImage digest is available')
             latest = max(candidates, key=lambda x: semver(x['version']), default=None)
             error = ''

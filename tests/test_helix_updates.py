@@ -27,7 +27,7 @@ class HelixUpdates(Fixtures):
     def check(self, data):
         response = FakeResponse(json.dumps(data).encode(), manager.API)
         response.headers = {'ETag': 'fixture'}
-        with patch('manager.https_context', return_value=None), patch('manager.urllib.request.urlopen', return_value=response):
+        with patch('release_metadata.https_context', return_value=None), patch('manager.urllib.request.urlopen', return_value=response):
             return self.m.check_update(True)
 
     def test_reviewed_release_is_accepted_and_unreviewed_old_or_replaced_assets_are_rejected(self):
@@ -44,7 +44,7 @@ class HelixUpdates(Fixtures):
             size=26037871, checked_at=time.time(), etag='obsolete'))
         response = FakeResponse(json.dumps(release()).encode(), manager.API)
         response.headers = {}
-        with patch('manager.https_context', return_value=None), patch('manager.urllib.request.urlopen', return_value=response) as request:
+        with patch('release_metadata.https_context', return_value=None), patch('manager.urllib.request.urlopen', return_value=response) as request:
             actual = self.m.check_update()
         self.assertEqual(actual['size'], PINNED['size'])
         self.assertNotIn('If-none-match', request.call_args.args[0].headers)
@@ -54,7 +54,7 @@ class HelixUpdates(Fixtures):
         actual['failed_at'] = 100
         manager.atomic_json(self.m.settings / 'release.json', actual)
         error = urllib.error.HTTPError(manager.API, 304, 'unchanged', {}, None)
-        with patch('manager.https_context', return_value=None), patch('manager.urllib.request.urlopen', side_effect=error):
+        with patch('release_metadata.https_context', return_value=None), patch('manager.urllib.request.urlopen', side_effect=error):
             result = self.m.check_update(True)
         self.assertIsNone(result['error'])
         self.assertNotIn('failed_at', result)

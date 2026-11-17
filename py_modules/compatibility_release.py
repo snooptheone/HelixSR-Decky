@@ -15,7 +15,6 @@ REVIEWED_CHOICES = OFFERED_CHOICES + RETIRED_CHOICES
 HLX_CHOICES = {'reviewed-3.3.0': '3.3.0', 'reviewed-3.2.0': '3.2.0'}
 RECOMMENDED_CHOICE = 'reviewed-2.0.0'
 
-_UNSUPPORTED_FROM = (1, 9, 0)
 _COMPATIBLE_TUPLE = (1, 8, 1)
 
 # Immutable pinned identity of the official v1.8.1 asset.

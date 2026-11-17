@@ -59,6 +59,20 @@ class DesktopUpdatesTests(unittest.TestCase):
         self.assertEqual(status['latest_version'], '0.3.0')
         self.assertTrue(status['update_available'])
 
+    def test_feed_without_desktop_releases_is_up_to_date_unless_a_desktop_tag_is_broken(self):
+        plugin = release('0.1.50')
+        plugin['tag_name'] = 'v0.1.50'
+        broken = release('0.2.0')
+        broken['assets'][0]['digest'] = 'bad'
+        for feed, expected in (([], ''), ([plugin], ''), ([broken], 'No official desktop release')):
+            with self.subTest(feed=feed), patch.object(updates, 'https_context', return_value=None), \
+                    patch.object(updates.urllib.request, 'urlopen', return_value=Response(
+                        json.dumps(feed).encode(), updates.API)):
+                status = self.updater.check(True)
+            self.assertFalse(status['update_available'])
+            self.assertEqual(bool(status['error']), bool(expected))
+            self.assertIn(expected, status['error'])
+
     def download(self, actual, expected=IMAGE, host='https://release-assets.githubusercontent.com/asset'):
         metadata = release(body=expected)
         responses = [Response(json.dumps([metadata]).encode(), updates.API), Response(actual, host)]

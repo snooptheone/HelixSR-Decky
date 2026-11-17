@@ -44,3 +44,25 @@ jobs:
             release-desktop/*
             desktop-*-smoke.png
           if-no-files-found: error
+  publish:
+    # A tag like desktop-v0.2.0 publishes exactly the AppImage the native-linux job built and tested.
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: native-linux
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download the validated AppImage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name HelixSR-Desktop --dir download
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#desktop-v}"
+          image=$(find download -name "HelixSR-Desktop-$version-x86_64.AppImage" | head -n 1)
+          test -n "$image" || { echo "Tag $GITHUB_REF_NAME does not match the AppImage version"; exit 1; }
+          gh release create "$GITHUB_REF_NAME" "$image" \
+            --repo "$GITHUB_REPOSITORY" --title "HelixSR Desktop $version" --generate-notes
